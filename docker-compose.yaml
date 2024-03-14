@@ -1,0 +1,18 @@
+version: "3"
+
+volumes:
+  debugfs:
+    driver: local
+    driver_opts:
+      type: debugfs
+      device: debugfs
+
+services:
+  tc-gtpu:
+    image: tariromukute/tc-gtpu:latest
+    command: tail -f /dev/null
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    volumes:
+      - debugfs:/sys/kernel/debug:rw
