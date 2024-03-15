@@ -6,6 +6,9 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
 #include <linux/ip.h>
+#include <linux/ipv6.h>
+#include <linux/udp.h>
+#include <linux/in.h>
 #include "gtpu.h"
 
 #define TC_ACT_UNSPEC         (-1)
@@ -18,8 +21,103 @@
 #define __section(x) __attribute__((section(x), used))
 
 #define DEFAULT_QFI 9
-const int gtpu_interface  = 2;
-const __u32 gtpu_dest_ip = 0xac120002; // 172.18.0.2
+#define UDP_CSUM_OFF offsetof(struct udphdr, check)
+#define IP_CSUM_OFF (ETH_HLEN + offsetof(struct iphdr, check))
+#define IP_SRC_OFF (ETH_HLEN + offsetof(struct iphdr, saddr))
+#define IP_DST_OFF (ETH_HLEN + offsetof(struct iphdr, daddr))
+
+const int gtpu_interface  = 16;
+const __be32 gtpu_dest_ip = bpf_htonl(0xac110003); // 172.17.0.3
+const __be32 gtpu_src_ip = bpf_htonl(0xac110002); // 172.17.0.2
+
+
+struct ipv4_gtpu_encap {
+    struct iphdr ipv4h;
+    struct udphdr udp;
+    struct gtpuhdr gtpu;
+    struct gtpu_hdr_ext gtpu_hdr_ext;
+    struct gtp_pdu_session_container pdu;
+} __attribute__((__packed__));
+
+struct ipv6_gtpu_encap {
+    struct ipv6hdr ipv6h;
+    struct udphdr udp;
+    struct gtpuhdr gtpu;
+    struct gtpu_hdr_ext gtpu_hdr_ext;
+    struct gtp_pdu_session_container pdu;
+} __attribute__((__packed__));
+
+static struct ipv4_gtpu_encap ipv4_gtpu_encap = {
+	.ipv4h.version = 4,
+    .ipv4h.ihl = 5,
+    .ipv4h.ttl = 64,
+    .ipv4h.protocol = IPPROTO_UDP,
+    .ipv4h.saddr = bpf_htonl(0x0a000304), // 10.0.3.4
+    .ipv4h.daddr = bpf_htonl(0x0a000305), // 10.0.3.5
+    .ipv4h.check = 0, // bpf_htons(0x609b),
+
+    .udp.source = bpf_htons(2152),
+	.udp.dest = bpf_htons(2152),
+    .udp.check = 0,
+	
+    .gtpu.flags = 0x34,
+	.gtpu.message_type = GTPU_G_PDU,
+    .gtpu.message_length = 0,
+    
+	.gtpu_hdr_ext.sqn = 0,
+	.gtpu_hdr_ext.npdu = 0,
+	.gtpu_hdr_ext.next_ext = GTPU_EXT_TYPE_PDU_SESSION_CONTAINER,
+	.pdu.length = 1,
+	.pdu.pdu_type = PDU_SESSION_CONTAINER_PDU_TYPE_UL_PSU,
+	.pdu.next_ext = 0,
+};
+
+static struct ipv6_gtpu_encap ipv6_gtpu_encap = {
+	.udp.source = bpf_htons(2152),
+	.udp.dest = bpf_htons(2152),
+	
+    .gtpu.flags = 0x34,
+	.gtpu.message_type = GTPU_G_PDU,
+    .gtpu.message_length = 0,
+
+	.gtpu_hdr_ext.sqn = 0,
+	.gtpu_hdr_ext.npdu = 0,
+	.gtpu_hdr_ext.next_ext = GTPU_EXT_TYPE_PDU_SESSION_CONTAINER,
+	.pdu.length = 1,
+	.pdu.pdu_type = PDU_SESSION_CONTAINER_PDU_TYPE_UL_PSU,
+	.pdu.next_ext = 0,
+};
+
+/* Logic for checksum, thanks to https://github.com/facebookincubator/katran/blob/main/katran/lib/bpf/csum_helpers.h */
+__attribute__((__always_inline__))
+static inline __u16 csum_fold_helper(__u64 csum) {
+    int i;
+#pragma unroll
+    for (i = 0; i < 4; i++) {
+        if (csum >> 16)
+            csum = (csum & 0xffff) + (csum >> 16);
+    }
+    return ~csum;
+}
+
+__attribute__((__always_inline__))
+static inline void ipv4_csum(void* data_start, int data_size, __u64* csum) {
+    *csum = bpf_csum_diff(0, 0, data_start, data_size, *csum);
+    *csum = csum_fold_helper(*csum);
+}
+
+__attribute__((__always_inline__))
+static inline void ipv4_csum_inline(
+    void* iph,
+    __u64* csum) {
+  __u16* next_iph_u16 = (__u16*)iph;
+#pragma clang loop unroll(full)
+    for (int i = 0; i < sizeof(struct iphdr) >> 1; i++) {
+        *csum += *next_iph_u16++;
+    }
+    *csum = csum_fold_helper(*csum);
+}
+
 
 SEC("tnl_if_ingress")
 int tnl_if_ingress_fn(struct __sk_buff *skb)
@@ -63,6 +161,9 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
     void *data_end = (void *)(unsigned long long)skb->data_end;
     void *data = (void *)(unsigned long long)skb->data;
     struct ethhdr *eth = data;
+    __u64 csum = 0;
+
+    int payload_len = (data_end - data) - sizeof(struct ethhdr);
 
     if (data + sizeof(struct ethhdr) > data_end)
         return TC_ACT_SHOT;
@@ -70,68 +171,42 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
     if (eth->h_proto == ___constant_swab16(ETH_P_IP)) {
         // TODO: Logic to fetch QFI and TEID from maps or use defaults
         __u32 qfi = DEFAULT_QFI;
-        __u32 teid = skb->ifindex;  // Use interface index as default TEID
+        __u32 teid = 9; //skb->ifindex;  // Use interface index as default TEID
 
         
-        int roomlen = sizeof(struct iphdr) + sizeof(struct gtpuhdr);
-        // Check if there is enough headroom in the skb
+        int roomlen = sizeof(struct ipv4_gtpu_encap);
         int ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, 0);
         if (ret) {
             bpf_printk("error calling skb adjust room.\n");
             return TC_ACT_SHOT;
         }
 
-        
-
         // Adjust pointers to new packet location after possible linearization
         data_end = (void *)(unsigned long long)skb->data_end;
         data = (void *)(unsigned long long)skb->data;
         eth = data;
 
-        // TODO: Build GTPU header
-        struct gtpuhdr gtpu_hdr = {
-            .teid = bpf_htonl(teid),
-        };
+        ipv4_gtpu_encap.ipv4h.daddr = gtpu_dest_ip;
+        ipv4_gtpu_encap.ipv4h.saddr = gtpu_src_ip;
+        ipv4_gtpu_encap.ipv4h.tot_len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len);
+        
+        ipv4_csum_inline(&ipv4_gtpu_encap.ipv4h, &csum);
+        ipv4_gtpu_encap.ipv4h.check = csum;
+        
+        ipv4_gtpu_encap.udp.len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len - sizeof(struct iphdr));
 
-        // TODO: Build the IP header to deliver the GTPU packet to
-        struct iphdr *ip = (struct iphdr*)(eth + 1);
-        __be32 saddr = ip->saddr;
-        __be32 daddr = bpf_htonl(gtpu_dest_ip);
-        ip->saddr = daddr;
-        ip->daddr = saddr;
-        ip->ttl -= 1;
-        ip->check = 0;
-        // ip->check = ip_fast_csum(ip, ip->ihl);
+        ipv4_gtpu_encap.gtpu.teid = bpf_htonl(teid);
+        ipv4_gtpu_encap.gtpu.message_length = bpf_htons(payload_len + sizeof(struct gtpu_hdr_ext) + sizeof(struct gtp_pdu_session_container));
 
         int offset = sizeof(struct ethhdr);
-        ret = bpf_skb_store_bytes(skb, offset, ip, sizeof(struct iphdr),
-                            BPF_F_RECOMPUTE_CSUM);
+        ret = bpf_skb_store_bytes(skb, offset, &ipv4_gtpu_encap, roomlen, 0);
         if (ret) {
             bpf_printk("error storing ip header\n");
             return TC_ACT_SHOT;
         }
-
-        offset += sizeof(struct iphdr);
-        ret = bpf_skb_store_bytes(skb, offset, &gtpu_hdr, sizeof(struct gtpuhdr),
-                            BPF_F_RECOMPUTE_CSUM);
-        if (ret) {
-            bpf_printk("error storing gtpu header\n");
-            return TC_ACT_SHOT;
-        }
-
-        // TODO: Redirect to egress of gtpu_interface
-        skb->protocol = bpf_htons(0x86dd);  // Change protocol to IPv6
-        // skb->priority = TC_PRIO_CONTROL;
-        // skb->mark = 0;
-        // skb->vlan_present = 0;
-        // skb->vlan_tci = 0;
-        // skb->tc_index = 0;
-        // skb->tc_classid = 0;
-        // skb->cb = 0;
-        // skb->dev = gtpu_interface;
-        // skb->offload_fwd_mark = 0;
-        return bpf_redirect(gtpu_interface, 0); // 0 for egress
-        // bpf_redirect_neigh might be a better call
+        
+        bpf_printk("Redirecting to gtpu interface\n");
+        return bpf_redirect_neigh(gtpu_interface, NULL, 0, 0);
 
     } else {
         return TC_ACT_OK;
@@ -192,7 +267,6 @@ int gtpu_egress_fn(struct __sk_buff *skb)
 
 	if (eth->h_proto == ___constant_swab16(ETH_P_IP)) {
        
-
         bpf_printk("Got IP packet");
 		return TC_ACT_OK;
     } else {

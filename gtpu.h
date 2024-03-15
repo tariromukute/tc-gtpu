@@ -14,23 +14,7 @@
 #define GTPU_G_PDU (255)
 
 struct gtpuhdr {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-    unsigned int pn : 1;
-    unsigned int s : 1;
-    unsigned int e : 1;
-    unsigned int spare : 1;
-    unsigned int pt : 1;
-    unsigned int version : 3;
-#elif __BYTE_ORDER == __BIG_ENDIAN
-    unsigned int version : 3;
-    unsigned int pt : 1;
-    unsigned int spare : 1;
-    unsigned int e : 1;
-    unsigned int s : 1;
-    unsigned int pn : 1;
-#else
-#error "Please fix <bits/endian.h>"
-#endif
+    char flags;
     __u8 message_type;
     __u16 message_length;
     __u32 teid;

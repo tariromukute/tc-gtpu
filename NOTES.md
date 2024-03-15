@@ -63,6 +63,30 @@ docker run \
 Or
 3. Docker compose file
 
+## Attach eBPF programs
+
+```bash
+tc qdisc add dev eth0 clsact
+tc filter add dev eth0 ingress bpf direct-action obj gtpu.bpf.o sec gtpu_ingress
+tc filter add dev eth0 egress bpf direct-action obj gtpu.bpf.o sec gtpu_egress
+tc filter show dev eth0
+tc filter show dev eth0 ingress
+tc filter show dev eth0 egress
+
+tc qdisc add dev lo clsact
+tc filter add dev lo ingress bpf direct-action obj gtpu.bpf.o sec tnl_if_ingress
+tc filter add dev lo egress bpf direct-action obj gtpu.bpf.o sec tnl_if_egress
+tc filter show dev lo
+tc filter show dev lo ingress
+tc filter show dev lo egress
+```
+
+```bash
+# Testing
+ping -I lo 8.8.8.8 -c 5
+# Analyse packet
+tcpdump -i eth0 -w tmp.pcap
+```
 ## Useful Resources
 
 - [Understanding tc “direct action” mode for BPF](https://qmonnet.github.io/whirl-offload/2020/04/11/tc-bpf-direct-action/)
