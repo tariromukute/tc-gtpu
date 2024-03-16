@@ -19,12 +19,6 @@ apt install clang llvm libbpf-dev iproute2 iputils-ping
 clang -O2 -emit-llvm -c gtpu.bpf.c -o - | \
 	llc -march=bpf -mcpu=probe -filetype=obj -o gtpu.bpf.o
 
-tc qdisc add dev eth0 clsact
-tc filter add dev eth0 ingress bpf direct-action obj gtpu.bpf.o sec .text
-tc filter add dev eth0 egress bpf direct-action obj gtpu.bpf.o sec .text
-tc filter show dev eth0
-tc filter show dev eth0 ingress
-
 # On seperate terminal, print logs
 cat /sys/kernel/debug/tracing/trace_pipe
 ```
@@ -39,6 +33,7 @@ docker run \
     -it \
     --cap-add=NET_ADMIN \
     --cap-add=SYS_ADMIN \
+    --device /dev/net/tun \
     -v /sys/kernel/debug/:/sys/kernel/debug/ \
     -v `pwd`/:/home \
     tariromukute/tc-gtpu:latest
@@ -56,6 +51,7 @@ docker run \
     -it \
     --cap-add=NET_ADMIN \
     --cap-add=SYS_ADMIN \
+    --device /dev/net/tun \
     -v debugfs:/sys/kernel/debug:rw \
     tariromukute/tc-gtpu:latest
 ```
@@ -63,6 +59,15 @@ docker run \
 Or
 3. Docker compose file
 
+## Create dummy interface to act as UE interface
+
+```bash
+ip link add uegtp0 type dummy
+ip addr add 12.1.1.2/24 dev uegtp0
+ip link set uegtp0 up
+
+ip link show
+```
 ## Attach eBPF programs
 
 ```bash
@@ -73,17 +78,17 @@ tc filter show dev eth0
 tc filter show dev eth0 ingress
 tc filter show dev eth0 egress
 
-tc qdisc add dev lo clsact
-tc filter add dev lo ingress bpf direct-action obj gtpu.bpf.o sec tnl_if_ingress
-tc filter add dev lo egress bpf direct-action obj gtpu.bpf.o sec tnl_if_egress
-tc filter show dev lo
-tc filter show dev lo ingress
-tc filter show dev lo egress
+tc qdisc add dev uegtp0 clsact
+tc filter add dev uegtp0 ingress bpf direct-action obj gtpu.bpf.o sec tnl_if_ingress
+tc filter add dev uegtp0 egress bpf direct-action obj gtpu.bpf.o sec tnl_if_egress
+tc filter show dev uegtp0
+tc filter show dev uegtp0 ingress
+tc filter show dev uegtp0 egress
 ```
 
 ```bash
 # Testing
-ping -I lo 8.8.8.8 -c 5
+ping -I uegtp0 8.8.8.8 -c 5
 # Analyse packet
 tcpdump -i eth0 -w tmp.pcap
 ```

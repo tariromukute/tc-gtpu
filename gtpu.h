@@ -1,3 +1,6 @@
+#ifndef __GTPU_H
+#define __GTPU_H
+
 #include <linux/types.h>
 #include <linux/unistd.h>
 
@@ -39,3 +42,5 @@ struct gtp_pdu_session_container {
     __u8 spare2 : 1;    
     __u8 next_ext;
 } __attribute__((packed));
+
+#endif /* __GTPU_H */

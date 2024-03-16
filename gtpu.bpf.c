@@ -8,8 +8,10 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/udp.h>
+#include <linux/tcp.h>
 #include <linux/in.h>
 #include "gtpu.h"
+#include "parsing_helpers.h"
 
 #define TC_ACT_UNSPEC         (-1)
 #define TC_ACT_OK               0
@@ -26,7 +28,7 @@
 #define IP_SRC_OFF (ETH_HLEN + offsetof(struct iphdr, saddr))
 #define IP_DST_OFF (ETH_HLEN + offsetof(struct iphdr, daddr))
 
-const int gtpu_interface  = 16;
+const int gtpu_interface  = 22;
 const __be32 gtpu_dest_ip = bpf_htonl(0xac110003); // 172.17.0.3
 const __be32 gtpu_src_ip = bpf_htonl(0xac110002); // 172.17.0.2
 
@@ -56,8 +58,8 @@ static struct ipv4_gtpu_encap ipv4_gtpu_encap = {
     .ipv4h.daddr = bpf_htonl(0x0a000305), // 10.0.3.5
     .ipv4h.check = 0, // bpf_htons(0x609b),
 
-    .udp.source = bpf_htons(2152),
-	.udp.dest = bpf_htons(2152),
+    .udp.source = bpf_htons(GTP_UDP_PORT),
+	.udp.dest = bpf_htons(GTP_UDP_PORT),
     .udp.check = 0,
 	
     .gtpu.flags = 0x34,
@@ -73,8 +75,8 @@ static struct ipv4_gtpu_encap ipv4_gtpu_encap = {
 };
 
 static struct ipv6_gtpu_encap ipv6_gtpu_encap = {
-	.udp.source = bpf_htons(2152),
-	.udp.dest = bpf_htons(2152),
+	.udp.source = bpf_htons(GTP_UDP_PORT),
+	.udp.dest = bpf_htons(GTP_UDP_PORT),
 	
     .gtpu.flags = 0x34,
 	.gtpu.message_type = GTPU_G_PDU,
@@ -165,8 +167,10 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
 
     int payload_len = (data_end - data) - sizeof(struct ethhdr);
 
-    if (data + sizeof(struct ethhdr) > data_end)
+    if (data + sizeof(struct ethhdr) > data_end) {
+        bpf_printk("error data less than eth header\n");
         return TC_ACT_SHOT;
+    }
 
     if (eth->h_proto == ___constant_swab16(ETH_P_IP)) {
         // TODO: Logic to fetch QFI and TEID from maps or use defaults
@@ -190,9 +194,6 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
         ipv4_gtpu_encap.ipv4h.saddr = gtpu_src_ip;
         ipv4_gtpu_encap.ipv4h.tot_len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len);
         
-        ipv4_csum_inline(&ipv4_gtpu_encap.ipv4h, &csum);
-        ipv4_gtpu_encap.ipv4h.check = csum;
-        
         ipv4_gtpu_encap.udp.len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len - sizeof(struct iphdr));
 
         ipv4_gtpu_encap.gtpu.teid = bpf_htonl(teid);
@@ -209,6 +210,7 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
         return bpf_redirect_neigh(gtpu_interface, NULL, 0, 0);
 
     } else {
+        bpf_printk("error: protocol not ETH_P_IP, it is: %d\n", eth->h_proto);
         return TC_ACT_OK;
     }
 }
@@ -228,24 +230,40 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
     bpf_printk("Received packet on gtpu_ingress\n");
 	void *data_end = (void *)(unsigned long long)skb->data_end;
 	void *data = (void *)(unsigned long long)skb->data;
-	struct ethhdr *eth = data;
+    int eth_type, ip_type, err;
+	struct hdr_cursor nh = { .pos = data };
+	struct ethhdr *eth;
+	struct iphdr *iphdr;
+    struct udphdr *udphdr;
+    struct gtpuhdr *gtpuhdr;
+	struct gtp_pdu_session_container *pdu;
 
-	if (data + sizeof(struct ethhdr) > data_end)
-		return TC_ACT_SHOT;
+    // Check if the incoming packet is GTPU
+	eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type != bpf_htons(ETH_P_IP))
+		goto out;
 
-	if (eth->h_proto == ___constant_swab16(ETH_P_IP)) {
-        // TODO: Check if it's a GTPU packet
+	ip_type = parse_iphdr(&nh, data_end, &iphdr);
+	if (ip_type != IPPROTO_UDP)
+		goto out;
 
-        // TODO: Logic to get the tunnel interface from tied_map or use default
+	if (parse_udphdr(&nh, data_end, &udphdr) < 0)
+		goto out;
 
-        // TODO: Parse and remove GTPU header
+    if (udphdr->dest != bpf_htons(GTP_UDP_PORT))
+        goto out;
 
-        // TODO: Send packet to tunnel interface using bpf_redirect(tnl_interface, BPF_F_INGRESS)
-		return TC_ACT_OK;
-        // bpf_redirect_peer might be a better call
-    } else {
-		return TC_ACT_OK;
-    }
+    if (parse_gtpuhdr(&nh, data_end, &gtpuhdr) < 0)
+		goto out;
+        
+    // Send to ingress of interface, default ifindex = teid
+    int tnl_interface = gtpuhdr->teid;
+
+    // bpf_redirect_peer might be a better call
+    return bpf_redirect(tnl_interface, BPF_F_INGRESS);
+
+out:
+    return TC_ACT_OK;
 };
 
 SEC("gtpu_egress")
@@ -260,18 +278,35 @@ int gtpu_egress_fn(struct __sk_buff *skb)
     bpf_printk("Received packet on gtpu_egress\n");
 	void *data_end = (void *)(unsigned long long)skb->data_end;
 	void *data = (void *)(unsigned long long)skb->data;
-	struct ethhdr *eth = data;
+    int eth_type, ip_type, err;
+    struct hdr_cursor nh = { .pos = data };
+	struct ethhdr *eth; // = data;
+    struct gtpuhdr *ghdr;
+	struct gtp_pdu_session_container *pdu;
+	struct iphdr *iphdr;
+    struct udphdr *udphdr;
+    __u64 csum = 0;
 
-	if (data + sizeof(struct ethhdr) > data_end)
-		return TC_ACT_SHOT;
+    eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type != bpf_htons(ETH_P_IP))
+		goto out;
 
-	if (eth->h_proto == ___constant_swab16(ETH_P_IP)) {
-       
-        bpf_printk("Got IP packet");
-		return TC_ACT_OK;
-    } else {
-		return TC_ACT_OK;
-    }
+	ip_type = parse_iphdr(&nh, data_end, &iphdr);
+	if (ip_type != IPPROTO_UDP)
+		goto out;
+
+	if (parse_udphdr(&nh, data_end, &udphdr) < 0)
+		goto out;
+
+    if (udphdr->dest != bpf_htons(GTP_UDP_PORT))
+        goto out;
+
+    ipv4_csum_inline(iphdr, &csum);
+    iphdr->check = csum;
+
+	bpf_printk("Got GTPU packet on egress");
+out:
+    return TC_ACT_OK;
 };
 
 char __license[] __section("license") = "GPL";
