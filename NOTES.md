@@ -16,8 +16,11 @@ apt update
 
 apt install clang llvm libbpf-dev iproute2 iputils-ping
 
-clang -O2 -emit-llvm -c gtpu.bpf.c -o - | \
+# -g for BTF
+clang -O2 -emit-llvm -g -c gtpu.bpf.c -o - | \
 	llc -march=bpf -mcpu=probe -filetype=obj -o gtpu.bpf.o
+
+clang -o gtpu_loader gtpu_loader.c -lbpf
 
 # On seperate terminal, print logs
 cat /sys/kernel/debug/tracing/trace_pipe
@@ -31,10 +34,13 @@ Either:
 ```bash
 docker run \
     -it \
+    # --privileged \
     --cap-add=NET_ADMIN \
     --cap-add=SYS_ADMIN \
     --device /dev/net/tun \
-    -v /sys/kernel/debug/:/sys/kernel/debug/ \
+    -v /sys/:/sys/ \
+    # -v /lib/modules/:/lib/modules/:ro \
+    # -v /usr/src:/usr/src:ro \
     -v `pwd`/:/home \
     tariromukute/tc-gtpu:latest
 
@@ -91,6 +97,16 @@ tc filter show dev uegtp0 egress
 ping -I uegtp0 8.8.8.8 -c 5
 # Analyse packet
 tcpdump -i eth0 -w tmp.pcap
+```
+
+Or
+
+```bash
+./gtpu_loader -g eth0 -i uegtp -s 172.0.0.1 -d 172.0.0.2 -u 12.1.1.2 -t 1234 -q 9 -n 2
+```
+
+```bash
+docker run -it --rm --privileged --pid=host ubuntu:latest nsenter -t 1 -m -u -n -i sh -c 'cat /proc/config.gz | gunzip | grep CONFIG_DEBUG_INFO_BTF'
 ```
 ## Useful Resources
 

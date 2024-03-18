@@ -11,6 +11,7 @@
 #include <linux/tcp.h>
 #include <linux/in.h>
 #include "gtpu.h"
+#include "config.h"
 #include "parsing_helpers.h"
 
 #define TC_ACT_UNSPEC         (-1)
@@ -31,7 +32,6 @@
 const int gtpu_interface  = 22;
 const __be32 gtpu_dest_ip = bpf_htonl(0xac110003); // 172.17.0.3
 const __be32 gtpu_src_ip = bpf_htonl(0xac110002); // 172.17.0.2
-
 
 struct ipv4_gtpu_encap {
     struct iphdr ipv4h;
@@ -89,6 +89,22 @@ static struct ipv6_gtpu_encap ipv6_gtpu_encap = {
 	.pdu.pdu_type = PDU_SESSION_CONTAINER_PDU_TYPE_UL_PSU,
 	.pdu.next_ext = 0,
 };
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, __u32); // teid
+	__type(value, struct ingress_state);
+	__uint(max_entries, 32);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} ingress_map SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, __u32); // ifindex
+	__type(value, struct egress_state);
+	__uint(max_entries, 32);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} egress_map SEC(".maps");
 
 /* Logic for checksum, thanks to https://github.com/facebookincubator/katran/blob/main/katran/lib/bpf/csum_helpers.h */
 __attribute__((__always_inline__))
@@ -164,6 +180,9 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
     void *data = (void *)(unsigned long long)skb->data;
     struct ethhdr *eth = data;
     __u64 csum = 0;
+    __u32 qfi, teid;
+    __u32 key = skb->ifindex;
+    struct egress_state *state;
 
     int payload_len = (data_end - data) - sizeof(struct ethhdr);
 
@@ -173,11 +192,16 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
     }
 
     if (eth->h_proto == ___constant_swab16(ETH_P_IP)) {
-        // TODO: Logic to fetch QFI and TEID from maps or use defaults
-        __u32 qfi = DEFAULT_QFI;
-        __u32 teid = 9; //skb->ifindex;  // Use interface index as default TEID
-
-        
+        // Logic to fetch QFI and TEID from maps or use defaults
+        state = bpf_map_lookup_elem(&egress_map, &key);
+        if (state && state->teid && state->qfi) {
+            qfi = state->qfi;
+            teid = state->teid;
+        } else {
+            qfi = DEFAULT_QFI;
+            teid = skb->ifindex;  // Use interface index as default TEID
+        }
+            
         int roomlen = sizeof(struct ipv4_gtpu_encap);
         int ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, 0);
         if (ret) {
@@ -237,6 +261,9 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
     struct udphdr *udphdr;
     struct gtpuhdr *gtpuhdr;
 	struct gtp_pdu_session_container *pdu;
+    int tnl_interface;
+    __u32 key, qfi;
+    struct ingress_state *state;
 
     // Check if the incoming packet is GTPU
 	eth_type = parse_ethhdr(&nh, data_end, &eth);
@@ -255,9 +282,16 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
 
     if (parse_gtpuhdr(&nh, data_end, &gtpuhdr) < 0)
 		goto out;
-        
-    // Send to ingress of interface, default ifindex = teid
-    int tnl_interface = gtpuhdr->teid;
+    
+    key = bpf_ntohl(gtpuhdr->teid);
+    state = bpf_map_lookup_elem(&ingress_map, &key);
+    if (state && state->qfi && state->ifindex) {
+        qfi = state->qfi;
+        tnl_interface = state->ifindex;
+    } else {
+        qfi = DEFAULT_QFI;
+        tnl_interface = gtpuhdr->teid; // default ifindex = teid
+    }
 
     // bpf_redirect_peer might be a better call
     return bpf_redirect(tnl_interface, BPF_F_INGRESS);

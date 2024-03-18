@@ -14,8 +14,6 @@
 #include <linux/tcp.h>
 #include "gtpu.h"
 
-// #include <linux/sctp.h>
-
 /* Header cursor to keep track of current parsing position */
 struct hdr_cursor {
 	void *data;
@@ -280,41 +278,5 @@ static __always_inline int parse_gtpuhdr(struct hdr_cursor *nh,
 
 	return len;
 }
-
-// static int loop_sctp_chuck(__u32 index, void *ctx)
-// {
-//     // Let ctx be a pointer to a cursor header that contains data_end
-//     struct hdr_cursor *nh = (struct hdr_cursor*) ctx;
-//     struct sctp_chunkhdr *chunkhdr = ctx;
-//     int len = bpf_ntohs(chunkhdr->length);
-//     if (nh->pos + len > nh->data_end)
-//         return 1;
-
-//     // TODO: do any work to the chunks
-    
-//     // Point ctx to next chuck
-//     nh->pos += len;
-//     return 0;
-// }
-
-// /*
-// * parse_sctphdr: parse and return the length of the sctp header
-// */
-// static __always_inline int parse_sctphdr(struct hdr_cursor *nh,
-//                                         void *data_end,
-//                                         struct sctphdr **sctphdr)
-// {
-//     int len;
-//     int num_chunks = 0;
-//     struct sctphdr *h = nh->pos;
-
-//     if ((void *)(h + 1) > data_end)
-//         return -1;
-
-//     nh->pos += len;
-//     *sctphdr = h;
-
-//     return 0;
-// }
 
 #endif /* __PARSING_HELPERS_H */
