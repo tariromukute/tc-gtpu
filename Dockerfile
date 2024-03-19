@@ -1,16 +1,15 @@
 FROM ubuntu:latest
 
 RUN apt-get update && \
-    apt-get install -y clang llvm libbpf-dev iproute2 iputils-ping tcpdump && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y clang llvm iproute2 iputils-ping tcpdump make git \
+    libelf1 libelf-dev zlib1g-dev gcc pkg-config 
+    # && \
+    # rm -rf /var/lib/apt/lists/*
 
 WORKDIR /home
 
-COPY gtpu.bpf.c ./
+COPY . ./
 
-RUN clang -O2 -emit-llvm -c gtpu.bpf.c -o - | llc -march=bpf -mcpu=probe -filetype=obj -o gtpu.bpf.o
+RUN make build
 
-# RUN tc qdisc add dev eth0 clsact
-# RUN tc filter add dev eth0 ingress bpf direct-action obj gtpu.bpf.o sec .text
-# RUN tc filter show dev eth0
-# RUN tc filter show dev eth0 ingress
+# ENTRYPOINT ./entrypoint.sh

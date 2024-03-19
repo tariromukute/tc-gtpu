@@ -6,6 +6,23 @@
 #include <linux/udp.h>
 #include <linux/tcp.h>
 #include <linux/in.h>
+#include "gtpu.h"
+
+struct ipv4_gtpu_encap {
+    struct iphdr ipv4h;
+    struct udphdr udp;
+    struct gtpuhdr gtpu;
+    struct gtpu_hdr_ext gtpu_hdr_ext;
+    struct gtp_pdu_session_container pdu;
+} __attribute__((__packed__));
+
+struct ipv6_gtpu_encap {
+    struct ipv6hdr ipv6h;
+    struct udphdr udp;
+    struct gtpuhdr gtpu;
+    struct gtpu_hdr_ext gtpu_hdr_ext;
+    struct gtp_pdu_session_container pdu;
+} __attribute__((__packed__));
 
 struct ingress_state {
     __u32 ifindex;
@@ -26,6 +43,7 @@ struct ip_addr {
 };
 
 struct gtpu_config {
+    int gtpu_ifindex;
     struct ip_addr saddr;
     struct ip_addr daddr;
 };

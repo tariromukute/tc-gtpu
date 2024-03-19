@@ -1,6 +1,12 @@
 {
     "files.associations": {
         "socket.h": "c",
-        "parsing_helpers.h": "c"
+        "parsing_helpers.h": "c",
+        "tc-gtpu.h": "c",
+        "tcgtpu.h": "c",
+        "unistd.h": "c",
+        "signal.h": "c",
+        "gtpu.h": "c",
+        "tc-gtpu.skel.h": "c"
     }
 }

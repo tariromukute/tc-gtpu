@@ -1,10 +1,4 @@
-
-/**
- * This is a BPF user program.
- * The program receive arguments for creating tunnel interfaces. It gets the source and dest
- * IP addresses, the first UE Ip address, the start teid, the qfi, the number of UEs to create.
- * The program will then put these into bpf maps.
-*/
+// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 
 static const char *__doc__=
  " TC GTPU Tunnel\n\n"
@@ -27,18 +21,19 @@ static const char *__doc__=
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <signal.h>
 
 #include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+#include "tc-gtpu.h"
+#include "tc-gtpu.skel.h"
 
-#include "config.h"
-
-static int verbose = 1;
-static const char *ingress_mapfile = "/sys/fs/bpf/tc/globals/ingress_map";
-static const char *egress_mapfile = "/sys/fs/bpf/tc/globals/egress_map";
+#define LO_IFINDEX 1
 
 #define CMD_MAX     2048
 #define CMD_MAX_TC  256
-static char tc_cmd[CMD_MAX_TC] = "tc";
+
+static int verbose = 1;
 
 struct config {
 	/* Define config */
@@ -211,111 +206,17 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 }
 
+static volatile sig_atomic_t exiting = 0;
 
-static int tc_remove_clsact(const char* dev)
+static void sig_int(int signo)
 {
-	char cmd[CMD_MAX];
-	int ret = 0;
-
-	/* Step-1: Delete clsact, which also remove filters */
-	memset(&cmd, 0, CMD_MAX);
-	snprintf(cmd, CMD_MAX,
-		 "%s qdisc del dev %s clsact 2> /dev/null",
-		 tc_cmd, dev);
-	if (verbose) printf(" - Run: %s\n", cmd);
-	ret = system(cmd);
-	if (!WIFEXITED(ret)) {
-		fprintf(stderr,
-			"ERR(%d): Cannot exec tc cmd\n Cmdline:%s\n",
-			WEXITSTATUS(ret), cmd);
-		exit(EXIT_FAILURE);
-	} else if (WEXITSTATUS(ret) == 2) {
-		/* Unfortunately TC use same return code for many errors */
-		if (verbose) printf(" - (First time loading clsact?)\n");
-	}
-
-	return ret;
+	exiting = 1;
 }
 
-static int tc_attach_clsact(const char* dev)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
-	char cmd[CMD_MAX];
-	int ret = 0;
-
-	memset(&cmd, 0, CMD_MAX);
-	snprintf(cmd, CMD_MAX,
-		 "%s qdisc add dev %s clsact",
-		 tc_cmd, dev);
-	if (verbose) printf(" - Run: %s\n", cmd);
-	ret = system(cmd);
-	if (ret) {
-		fprintf(stderr,
-			"ERR(%d): tc cannot attach qdisc hook\n Cmdline:%s\n",
-			WEXITSTATUS(ret), cmd);
-		exit(EXIT_FAILURE);
-	}
-
-	return ret;
+	return vfprintf(stderr, format, args);
 }
-
-static int tc_remove_filter(const char* dev, const char* type)
-{
-	char cmd[CMD_MAX];
-	int ret = 0;
-
-	memset(&cmd, 0, CMD_MAX);
-	snprintf(cmd, CMD_MAX,
-		 /* Remove all ingress filters on dev */
-		 "%s filter del dev %s %s",
-		 /* Alternatively could remove specific filter handle:
-		 "%s filter delete dev %s ingress prio 1 handle 1 bpf",
-		 */
-		 tc_cmd, dev, type);
-	if (verbose) printf(" - Run: %s\n", cmd);
-	ret = system(cmd);
-	if (ret) {
-		fprintf(stderr,
-			"ERR(%d): tc cannot remove filters\n Cmdline:%s\n",
-			ret, cmd);
-		exit(EXIT_FAILURE);
-	}
-	return ret;
-
-}
-
-static int tc_attach_bpf(const char* dev, const char* type, const char* bpf_obj, const char* prog_name)
-{
-	char cmd[CMD_MAX];
-	int ret = 0;
-
-	/* Step-1: Delete clsact, which also remove filters */
-	tc_remove_clsact(dev);
-
-	/* Step-2: Attach a new clsact qdisc */
-	tc_attach_clsact(dev);
-
-	/* Step-3: Attach BPF program/object as ingress filter */
-	memset(&cmd, 0, CMD_MAX);
-	snprintf(cmd, CMD_MAX,
-		 "%s filter add dev %s "
-		 "%s bpf direct-action obj %s sec %s",
-		 tc_cmd, dev, type, bpf_obj, prog_name);
-	if (verbose) printf(" - Run: %s\n", cmd);
-	ret = system(cmd);
-	if (ret) {
-		fprintf(stderr,
-			"ERR(%d): tc cannot attach filter\n Cmdline:%s\n",
-			WEXITSTATUS(ret), cmd);
-		exit(EXIT_FAILURE);
-	}
-
-	return ret;
-}
-
-
-static char gtpu_ifname[IF_NAMESIZE];
-static char tnl_ifname[IF_NAMESIZE];
-static char buf_ifname[IF_NAMESIZE] = "(unknown-dev)";
 
 static int create_dummy_interface(const char* ifname, const char* ip_address) {
 	char cmd[CMD_MAX];
@@ -366,52 +267,224 @@ static int create_dummy_interface(const char* ifname, const char* ip_address) {
 	return ret;
 }
 
-static int get_map_fd_by_path(const char* path)
-{
-	int fd = bpf_obj_get(path);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: cannot open bpf_obj_get(%s): %s(%d)\n",
-			path, strerror(errno), errno);
-		return -EXIT_FAILURE;
-	}
-
-	return fd;
-}
-
-static int init_egress_map(int fd, __u32 ifindex, struct egress_state* state)
-{
+static int delete_dummy_interface(const char* ifname) {
+	char cmd[CMD_MAX];
 	int ret = 0;
-	ret = bpf_map_update_elem(fd, &ifindex, state, 0);
-	if (ret) {
-		perror("ERROR: bpf_map_update_elem");
-		ret = -EXIT_FAILURE;
+
+	// Step 1: Create dummy interface */
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip link delete %s 2> /dev/null",
+		 ifname);
+	if (verbose) printf(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		fprintf(stderr,
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
 	}
+
 	return ret;
 }
 
-static int init_ingress_map(int fd, __u32 teid, struct ingress_state* state)
-{
-	int ret = 0;
-	ret = bpf_map_update_elem(fd, &teid, state, 0);
-	if (ret) {
-		perror("ERROR: bpf_map_update_elem");
-		ret = -EXIT_FAILURE;
+static int attach_hooks(int ifindex, struct tc_gtpu_bpf *skel) {
+	int err = 0;
+
+	fprintf(stderr, "Creating for index %d\n", ifindex);
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_ingress, .ifindex = ifindex,
+                        .attach_point = BPF_TC_INGRESS);
+    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_ingress, .handle = 1, .priority = 1);
+
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_egress, .ifindex = ifindex,
+                        .attach_point = BPF_TC_EGRESS);
+    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_egress, .handle = 1, .priority = 1);
+
+	tc_hook_ingress.attach_point = BPF_TC_INGRESS;
+	err = bpf_tc_hook_create(&tc_hook_ingress);
+	if (err && err != -EEXIST) {
+		// err = -errno;
+		fprintf(stderr, "%s: Failed to create BPF_TC_INGRESS hook: %s\n", __func__, strerror(err));
+		goto out;
 	}
-	return ret;
+
+	tc_opts_ingress.prog_fd = bpf_program__fd(skel->progs.tnl_if_ingress_fn);
+	err = bpf_tc_attach(&tc_hook_ingress, &tc_opts_ingress);
+	if (err) {
+		fprintf(stderr, "%s: Failed to attach BPF_TC_INGRESS: %d\n", __func__, err);
+		goto out;
+	}
+
+	err = bpf_tc_hook_create(&tc_hook_egress);
+	if (err && err != -EEXIST) {
+		fprintf(stderr, "%s: Failed to create BPF_TC_EGRESS hook: %d\n", __func__, err);
+		goto out;
+	}
+
+	tc_opts_egress.prog_fd = bpf_program__fd(skel->progs.tnl_if_egress_fn);
+	err = bpf_tc_attach(&tc_hook_egress, &tc_opts_egress);
+	if (err) {
+		fprintf(stderr, "%s: Failed to attach BPF_TC_EGRESS: %d\n", __func__, err);
+		goto out;
+	}
+
+out:
+	return err;
 }
+
+static int create_ue_interface(char *ifname, char *ue_address, int teid, struct config *cfg,
+                                 struct tc_gtpu_bpf *skel) {
+    int err = 0;
+
+    create_dummy_interface(ifname, ue_address);
+	int ifindex = if_nametoindex(ifname);
+	if (ifindex == 0) {
+		printf("Interface %s does not exist\n", ifname);
+		goto out;
+	}
+
+    err = attach_hooks(ifindex, skel);
+	if (err)
+		goto out;
+
+    struct ingress_state istate = {
+        .ifindex = ifindex,
+        .qfi = cfg->qfi,
+    };
+	err = bpf_map_update_elem(bpf_map__fd(skel->maps.ingress_map), &teid, &istate, 0);
+	if (err) {
+		perror("ERROR: bpf_map_update_elem");
+		goto out;
+	}
+
+    struct egress_state estate = {
+        .teid = teid,
+        .qfi = cfg->qfi,
+    };
+	err = bpf_map_update_elem(bpf_map__fd(skel->maps.egress_map), &teid, &estate, 0);
+	if (err) {
+		perror("ERROR: bpf_map_update_elem");
+		goto out;
+	}
+
+out:
+	return err;
+}
+
+static void init_tc_gtpu(struct config *cfg) {
+    struct tc_gtpu_bpf *skel;
+    int err;
+
+    libbpf_set_print(libbpf_print_fn);
+
+    skel = tc_gtpu_bpf__open();
+    if (!skel) {
+        perror("Failed to open BPF skeleton");
+	}
+
+	skel->rodata->config.gtpu_ifindex = if_nametoindex(cfg->gtpu_interface);
+    skel->rodata->config.daddr.af = cfg->dest_ip.af;
+    memcpy(&skel->rodata->config.daddr.addr, & cfg->dest_ip.addr, sizeof(struct ip_addr));
+    skel->rodata->config.saddr.af = cfg->src_ip.af;
+    memcpy(&skel->rodata->config.saddr.addr, &cfg->src_ip.addr, sizeof(struct ip_addr));
+
+	err = tc_gtpu_bpf__load(skel);
+	if (err)
+		perror("Failed to load TC hook");
+
+    DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_ingress, .ifindex = if_nametoindex(cfg->gtpu_interface),
+                        .attach_point = BPF_TC_INGRESS);
+    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_ingress, .handle = 1, .priority = 1);
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_egress, .ifindex = if_nametoindex(cfg->gtpu_interface),
+                        .attach_point = BPF_TC_EGRESS);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_egress, .handle = 1, .priority = 1);
+
+    // Set the GTP-U
+    tc_hook_ingress.ifindex = if_nametoindex(cfg->gtpu_interface);
+    tc_hook_ingress.attach_point = BPF_TC_INGRESS;
+    err = bpf_tc_hook_create(&tc_hook_ingress);
+    if (err && err != -EEXIST)
+        perror("Failed to create TC hook");
+
+    tc_opts_ingress.prog_fd = bpf_program__fd(skel->progs.gtpu_ingress_fn);
+    err = bpf_tc_attach(&tc_hook_ingress, &tc_opts_ingress);
+    if (err)
+        perror("Failed to attach TC");
+
+    err = bpf_tc_hook_create(&tc_hook_egress);
+    if (err && err != -EEXIST)
+        perror("Failed to create TC hook");
+
+    tc_opts_egress.prog_fd = bpf_program__fd(skel->progs.gtpu_egress_fn);
+    err = bpf_tc_attach(&tc_hook_egress, &tc_opts_egress);
+    if (err)
+        perror("Failed to attach TC");
+
+    // Create dummy interface for each UE
+    __u32 num_ues = cfg->num_ues;
+    char ue_address[INET6_ADDRSTRLEN];
+    int teid;
+    for (int i = 0; i < num_ues; ++i) {
+        teid = cfg->teid + i;
+        char ifname[IF_NAMESIZE];
+        snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_interface, i);
+
+        // Increment the last byte of IP address
+        if (cfg->ue_ip.af == AF_INET) {
+            struct in_addr addr = cfg->ue_ip.addr.addr4;
+            addr.s_addr = htonl(ntohl(addr.s_addr) + i);
+            inet_ntop(AF_INET, &addr, ue_address, INET_ADDRSTRLEN);
+        } else if (cfg->ue_ip.af == AF_INET6) {
+            memcpy(ue_address, &cfg->ue_ip.addr.addr6, sizeof(struct in6_addr));
+            __u8* last_byte = (__u8*) &ue_address[15];
+            *last_byte += (__u8)i;
+        }
+
+        create_ue_interface(ifname, ue_address, teid, cfg, skel);
+    }
+
+    if (signal(SIGINT, sig_int) == SIG_ERR)
+        perror("Can't set signal handler");
+
+    printf("Successfully started! To test: \n" 
+		"\t 1. RUN: `cat /sys/kernel/debug/tracing/trace_pipe` to see output of the BPF program.\n"
+		"\t 2. RUN: `ping -I %s0 8.8.8.8 -c 5` to send packet via the gtpu tunnel\n", cfg->tnl_interface);
+
+    while (!exiting) {
+        fprintf(stderr, ".");
+        sleep(1);
+    }
+
+    tc_opts_ingress.flags = tc_opts_ingress.prog_fd = tc_opts_ingress.prog_id = 0;
+    err = bpf_tc_detach(&tc_hook_ingress, &tc_opts_ingress);
+    if (err) {
+        perror("Failed to detach TC ingress");
+	}
+
+	tc_opts_egress.flags = tc_opts_egress.prog_fd = tc_opts_egress.prog_id = 0;
+    err = bpf_tc_detach(&tc_hook_egress, &tc_opts_egress);
+    if (err) {
+        perror("Failed to detach TC ingress");
+	}
+
+	for (int i = 0; i < num_ues; ++i) {
+        char ifname[IF_NAMESIZE];
+        snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_interface, i);
+        delete_dummy_interface(ifname);
+    }
+
+// cleanup:
+    bpf_tc_hook_destroy(&tc_hook_ingress);
+	bpf_tc_hook_destroy(&tc_hook_egress);
+    tc_gtpu_bpf__destroy(skel);
+}
+
+static char gtpu_ifname[IF_NAMESIZE];
+static char tnl_ifname[IF_NAMESIZE];
 
 int main(int argc, char **argv)
 {
-
-	int longindex = 0, opt, fd = -1;
-	int gtpu_ifindex = -1;
-	int tnl_ifindex = 0;
-	int key = 0;
-	size_t len;
-
-	char bpf_obj[256];
-	snprintf(bpf_obj, sizeof(bpf_obj), "gtpu.bpf.o");
-
+	
 	// Parse the command line arguments
 	struct config cfg = {0};
 	parse_cmdline_args(argc, argv, long_options, &cfg, __doc__);
@@ -460,59 +533,7 @@ int main(int argc, char **argv)
 
 	// Setup gtpu interface
 	snprintf(gtpu_ifname, sizeof(gtpu_ifname), "%s", cfg.gtpu_interface);
-	tc_attach_bpf(gtpu_ifname, "ingress", bpf_obj, "gtpu_ingress");
-	tc_attach_bpf(gtpu_ifname, "egress", bpf_obj, "gtpu_egress");
 
-	// Get map
-	int ingress_map_fd = bpf_obj_get(ingress_mapfile);
-	if (ingress_map_fd < 0)
-		goto err;
-
-	int egress_map_fd = bpf_obj_get(egress_mapfile);
-	if (egress_map_fd < 0)
-		goto err;
-	
-
-	// create dummy interfaces for ues
-    __u32 num_ues = cfg.num_ues;
-    char ifname[IF_NAMESIZE];
-	char ue_address[INET6_ADDRSTRLEN];
-	int ifindex, teid;
-    for (int i = 0; i < num_ues; ++i) {
-		teid = cfg.teid + i;
-        snprintf(ifname, sizeof(ifname), "%s%d", cfg.tnl_interface, i);
-        ifindex = if_nametoindex(ifname);
-		// Increment the ue_ip by i and call create_dummy_interface
-		if (cfg.ue_ip.af == AF_INET) {
-			struct in_addr addr = cfg.ue_ip.addr.addr4;
-			addr.s_addr = htonl(ntohl(addr.s_addr) + i); // increment the last byte of IP address
-			inet_ntop(AF_INET, &addr, ue_address, INET_ADDRSTRLEN);
-		} else if (cfg.ue_ip.af == AF_INET6) {
-			// Increment the last byte of IPv6 address
-			memcpy(ue_address, &cfg.ue_ip.addr.addr6, sizeof(struct in6_addr));
-			__u8* last_byte = (__u8*) &ue_address[15];
-			*last_byte += (__u8)i;
-		}
-
-    	create_dummy_interface(ifname, ue_address);
-		tc_attach_bpf(ifname, "ingress", bpf_obj, "tnl_if_ingress");
-		tc_attach_bpf(ifname, "egress", bpf_obj, "tnl_if_egress");
-
-		struct ingress_state istate = {
-			.ifindex = ifindex,
-			.qfi = cfg.qfi,
-		};
-		init_ingress_map(ingress_map_fd, teid, &istate);
-
-		struct egress_state estate = {
-			.teid = teid,
-			.qfi = cfg.qfi,
-		};
-		init_egress_map(egress_map_fd, ifindex, &estate);
-    }
-
-out:
-	return EXIT_SUCCESS;
-err:
-	return EXIT_FAILURE;
+	init_tc_gtpu(&cfg);
+	return 0;
 }

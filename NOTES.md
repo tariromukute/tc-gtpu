@@ -32,16 +32,13 @@ Either:
 1. create container and the mount the debugfs inside the container.
 
 ```bash
+# For dev: -v `pwd`/:/home \
 docker run \
     -it \
-    # --privileged \
     --cap-add=NET_ADMIN \
     --cap-add=SYS_ADMIN \
-    --device /dev/net/tun \
     -v /sys/:/sys/ \
-    # -v /lib/modules/:/lib/modules/:ro \
-    # -v /usr/src:/usr/src:ro \
-    -v `pwd`/:/home \
+    --device /dev/net/tun \
     tariromukute/tc-gtpu:latest
 
 mount -t debugfs debugfs /sys/kernel/debug
@@ -102,7 +99,7 @@ tcpdump -i eth0 -w tmp.pcap
 Or
 
 ```bash
-./gtpu_loader -g eth0 -i uegtp -s 172.0.0.1 -d 172.0.0.2 -u 12.1.1.2 -t 1234 -q 9 -n 2
+./tc-gtpu -g eth0 -i uegtp -s 172.0.0.1 -d 172.0.0.2 -u 12.1.1.2 -t 1234 -q 9 -n 2
 ```
 
 ```bash
@@ -114,4 +111,5 @@ docker run -it --rm --privileged --pid=host ubuntu:latest nsenter -t 1 -m -u -n 
 - [Run eBPF Programs in Docker using docker-bpf](https://hemslo.io/run-ebpf-programs-in-docker-using-docker-bpf/)
 - https://github.com/edgecomllc/eupf/issues/509
 - http://arthurchiao.art/blog/differentiate-bpf-redirects/
+- https://patchwork.kernel.org/project/netdevbpf/patch/20210512103451.989420-3-memxor@gmail.com/
 

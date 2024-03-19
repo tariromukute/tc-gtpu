@@ -10,8 +10,7 @@
 #include <linux/udp.h>
 #include <linux/tcp.h>
 #include <linux/in.h>
-#include "gtpu.h"
-#include "config.h"
+#include "tc-gtpu.h"
 #include "parsing_helpers.h"
 
 #define TC_ACT_UNSPEC         (-1)
@@ -24,30 +23,24 @@
 #define __section(x) __attribute__((section(x), used))
 
 #define DEFAULT_QFI 9
-#define UDP_CSUM_OFF offsetof(struct udphdr, check)
-#define IP_CSUM_OFF (ETH_HLEN + offsetof(struct iphdr, check))
-#define IP_SRC_OFF (ETH_HLEN + offsetof(struct iphdr, saddr))
-#define IP_DST_OFF (ETH_HLEN + offsetof(struct iphdr, daddr))
 
-const int gtpu_interface  = 22;
-const __be32 gtpu_dest_ip = bpf_htonl(0xac110003); // 172.17.0.3
-const __be32 gtpu_src_ip = bpf_htonl(0xac110002); // 172.17.0.2
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, __u32); // teid
+	__type(value, struct ingress_state);
+	__uint(max_entries, 32);
+    // __uint(pinning, LIBBPF_PIN_BY_NAME);
+} ingress_map SEC(".maps");
 
-struct ipv4_gtpu_encap {
-    struct iphdr ipv4h;
-    struct udphdr udp;
-    struct gtpuhdr gtpu;
-    struct gtpu_hdr_ext gtpu_hdr_ext;
-    struct gtp_pdu_session_container pdu;
-} __attribute__((__packed__));
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, __u32); // ifindex
+	__type(value, struct egress_state);
+	__uint(max_entries, 32);
+    // __uint(pinning, LIBBPF_PIN_BY_NAME);
+} egress_map SEC(".maps");
 
-struct ipv6_gtpu_encap {
-    struct ipv6hdr ipv6h;
-    struct udphdr udp;
-    struct gtpuhdr gtpu;
-    struct gtpu_hdr_ext gtpu_hdr_ext;
-    struct gtp_pdu_session_container pdu;
-} __attribute__((__packed__));
+const volatile struct gtpu_config config;
 
 static struct ipv4_gtpu_encap ipv4_gtpu_encap = {
 	.ipv4h.version = 4,
@@ -90,22 +83,6 @@ static struct ipv6_gtpu_encap ipv6_gtpu_encap = {
 	.pdu.next_ext = 0,
 };
 
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, __u32); // teid
-	__type(value, struct ingress_state);
-	__uint(max_entries, 32);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} ingress_map SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, __u32); // ifindex
-	__type(value, struct egress_state);
-	__uint(max_entries, 32);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} egress_map SEC(".maps");
-
 /* Logic for checksum, thanks to https://github.com/facebookincubator/katran/blob/main/katran/lib/bpf/csum_helpers.h */
 __attribute__((__always_inline__))
 static inline __u16 csum_fold_helper(__u64 csum) {
@@ -137,7 +114,7 @@ static inline void ipv4_csum_inline(
 }
 
 
-SEC("tnl_if_ingress")
+SEC("tc/ingress")
 int tnl_if_ingress_fn(struct __sk_buff *skb)
 {
     /**
@@ -162,7 +139,7 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
     }
 };
 
-SEC("tnl_if_egress")
+SEC("tc/egress")
 int tnl_if_egress_fn(struct __sk_buff *skb)
 {
     /**
@@ -214,8 +191,8 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
         data = (void *)(unsigned long long)skb->data;
         eth = data;
 
-        ipv4_gtpu_encap.ipv4h.daddr = gtpu_dest_ip;
-        ipv4_gtpu_encap.ipv4h.saddr = gtpu_src_ip;
+        ipv4_gtpu_encap.ipv4h.daddr = config.daddr.addr.addr4.s_addr;
+        ipv4_gtpu_encap.ipv4h.saddr = config.saddr.addr.addr4.s_addr;
         ipv4_gtpu_encap.ipv4h.tot_len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len);
         
         ipv4_gtpu_encap.udp.len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len - sizeof(struct iphdr));
@@ -231,7 +208,7 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
         }
         
         bpf_printk("Redirecting to gtpu interface\n");
-        return bpf_redirect_neigh(gtpu_interface, NULL, 0, 0);
+        return bpf_redirect_neigh(config.gtpu_ifindex, NULL, 0, 0);
 
     } else {
         bpf_printk("error: protocol not ETH_P_IP, it is: %d\n", eth->h_proto);
@@ -240,7 +217,7 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
 }
 
 
-SEC("gtpu_ingress")
+SEC("tc/ingress")
 int gtpu_ingress_fn(struct __sk_buff *skb)
 {
     /**
@@ -300,7 +277,7 @@ out:
     return TC_ACT_OK;
 };
 
-SEC("gtpu_egress")
+SEC("tc/egress")
 int gtpu_egress_fn(struct __sk_buff *skb)
 {
     /**
