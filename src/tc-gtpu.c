@@ -25,6 +25,7 @@ static const char *__doc__=
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
+#include "logging.h"
 #include "tc-gtpu.h"
 #include "tc-gtpu.skel.h"
 
@@ -32,8 +33,6 @@ static const char *__doc__=
 
 #define CMD_MAX     2048
 #define CMD_MAX_TC  256
-
-static int verbose = 1;
 
 struct config {
 	/* Define config */
@@ -134,21 +133,21 @@ void parse_cmdline_args(int argc, char **argv,
 				break;
 			case 'g':
                 if (!validate_ifname(optarg)) {
-                    printf("Invalid gtpu_ifname name\n");
+                    pr_warn("Invalid gtpu_ifname name\n");
                     usage(argv);
                     exit(EXIT_FAILURE);
                 }
                 cfg->gtpu_ifname = optarg;
                 gtpu_ifindex = if_nametoindex(cfg->gtpu_ifname);
                 if (gtpu_ifindex == 0) {
-                    printf("Interface %s does not exist\n", cfg->gtpu_ifname);
+                    pr_warn("Interface %s does not exist\n", cfg->gtpu_ifname);
                     usage(argv);
                     exit(EXIT_FAILURE);
                 }
                 break;
             case 'i':
                 if (!validate_ifname(optarg)) {
-                    printf("Invalid tnl_ifname name\n");
+                    pr_warn("Invalid tnl_ifname name\n");
                     usage(argv);
                     exit(EXIT_FAILURE);
                 }
@@ -156,21 +155,21 @@ void parse_cmdline_args(int argc, char **argv,
                 break;
 			case 's':
                 if (validate_ip_address(optarg, &cfg->src_ip) != 0) {
-					printf("Invalid source IP address\n");
+					pr_warn("Invalid source IP address\n");
 					usage(argv);
 					exit(EXIT_FAILURE);
 				}
                 break;
             case 'd':
                 if (validate_ip_address(optarg, &cfg->dest_ip) != 0) {
-					printf("Invalid destination IP address\n");
+					pr_warn("Invalid destination IP address\n");
 					usage(argv);
 					exit(EXIT_FAILURE);
 				}
                 break;
 			case 'u':
                 if (inet_pton(AF_INET, optarg, &(cfg->ue_ip.addr.addr4)) <= 0) {
-                    fprintf(stderr, "Invalid UE IP address '%s'\n", optarg);
+                    pr_warn("Invalid UE IP address '%s'\n", optarg);
                     exit(EXIT_FAILURE);
                 }
                 cfg->ue_ip.af = AF_INET;
@@ -227,10 +226,10 @@ static int create_dummy_interface(const char* ifname, const char* ip_address) {
 	snprintf(cmd, CMD_MAX,
 		 "ip link add %s type dummy 2> /dev/null",
 		 ifname);
-	if (verbose) printf(" - Run: %s\n", cmd);
+	pr_debug(" - Run: %s\n", cmd);
 	ret = system(cmd);
 	if (!WIFEXITED(ret)) {
-		fprintf(stderr,
+		pr_debug(
 			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
 			WEXITSTATUS(ret), cmd);
 		exit(EXIT_FAILURE);
@@ -241,10 +240,10 @@ static int create_dummy_interface(const char* ifname, const char* ip_address) {
 	snprintf(cmd, CMD_MAX,
 		 "ip addr add %s/24 dev %s 2> /dev/null",
 		 ip_address, ifname);
-	if (verbose) printf(" - Run: %s\n", cmd);
+	pr_debug(" - Run: %s\n", cmd);
 	ret = system(cmd);
 	if (!WIFEXITED(ret)) {
-		fprintf(stderr,
+		pr_debug(
 			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
 			WEXITSTATUS(ret), cmd);
 		exit(EXIT_FAILURE);
@@ -255,10 +254,10 @@ static int create_dummy_interface(const char* ifname, const char* ip_address) {
 	snprintf(cmd, CMD_MAX,
 		 "ip link set %s up 2> /dev/null",
 		 ifname);
-	if (verbose) printf(" - Run: %s\n", cmd);
+	pr_debug(" - Run: %s\n", cmd);
 	ret = system(cmd);
 	if (!WIFEXITED(ret)) {
-		fprintf(stderr,
+		pr_debug(
 			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
 			WEXITSTATUS(ret), cmd);
 		exit(EXIT_FAILURE);
@@ -276,10 +275,10 @@ static int delete_dummy_interface(const char* ifname) {
 	snprintf(cmd, CMD_MAX,
 		 "ip link delete %s 2> /dev/null",
 		 ifname);
-	if (verbose) printf(" - Run: %s\n", cmd);
+	pr_debug(" - Run: %s\n", cmd);
 	ret = system(cmd);
 	if (!WIFEXITED(ret)) {
-		fprintf(stderr,
+		pr_debug(
 			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
 			WEXITSTATUS(ret), cmd);
 		exit(EXIT_FAILURE);
@@ -321,13 +320,13 @@ static int tc_attach_program(struct tc_gtpu_bpf *skel, const char* prog_name, in
 
     err = bpf_tc_hook_create(&tc_hook);
     if (err && err != -EEXIST) {
-        printf("Failed to create TC hook (type: %d) ifindex: %d", attach_point, ifindex);
+        pr_warn("Failed to create TC hook (type: %d) ifindex: %d", attach_point, ifindex);
 		goto cleanup;
 	}
 
     err = bpf_tc_attach(&tc_hook, &tc_opts);
     if (err) {
-        printf("Failed to attach TC (type: %d) program: %s, on ifindex: %d", attach_point, prog_name, ifindex);
+        pr_warn("Failed to attach TC (type: %d) program: %s, on ifindex: %d", attach_point, prog_name, ifindex);
 		goto cleanup;
 	}
 
@@ -363,7 +362,7 @@ static int create_ue_interface(char *ifname, char *ue_address, int teid, struct 
     create_dummy_interface(ifname, ue_address);
 	int ifindex = if_nametoindex(ifname);
 	if (ifindex == 0) {
-		printf("Interface %s does not exist\n", ifname);
+		pr_warn("Interface %s does not exist\n", ifname);
 		goto out;
 	}
 
@@ -377,7 +376,7 @@ static int create_ue_interface(char *ifname, char *ue_address, int teid, struct 
     };
 	err = bpf_map_update_elem(bpf_map__fd(skel->maps.ingress_map), &teid, &istate, 0);
 	if (err) {
-		perror("ERROR: bpf_map_update_elem");
+		pr_warn("ERROR: bpf_map_update_elem");
 		goto out;
 	}
 
@@ -387,7 +386,7 @@ static int create_ue_interface(char *ifname, char *ue_address, int teid, struct 
     };
 	err = bpf_map_update_elem(bpf_map__fd(skel->maps.egress_map), &ifindex, &estate, 0);
 	if (err) {
-		perror("ERROR: bpf_map_update_elem");
+		pr_warn("ERROR: bpf_map_update_elem");
 		goto out;
 	}
 
@@ -403,7 +402,7 @@ static void tc_gtpu(struct config *cfg) {
 
     skel = tc_gtpu_bpf__open();
     if (!skel) {
-        perror("Failed to open BPF skeleton");
+        pr_warn("Failed to open BPF skeleton");
 		return;
 	}
 	int gtpu_ifindex = if_nametoindex(cfg->gtpu_ifname);
@@ -415,7 +414,7 @@ static void tc_gtpu(struct config *cfg) {
 
 	err = tc_gtpu_bpf__load(skel);
 	if (err) {
-		perror("Failed to load TC hook");
+		pr_warn("Failed to load TC hook");
 		tc_gtpu_bpf__destroy(skel);
 		return;
 	}
@@ -454,7 +453,7 @@ static void tc_gtpu(struct config *cfg) {
     }
 
     if (signal(SIGINT, sig_int) == SIG_ERR)
-        perror("Can't set signal handler");
+        pr_warn("Can't set signal handler");
 
     printf("Successfully started! To test: \n" 
 		"\t 1. RUN: `cat /sys/kernel/debug/tracing/trace_pipe` to see output of the BPF program.\n"
@@ -487,23 +486,23 @@ int main(int argc, char **argv)
 	struct config cfg = {0};
 	parse_cmdline_args(argc, argv, long_options, &cfg, __doc__);
 
-	printf("gtpu_ifname: %s\n", cfg.gtpu_ifname);
-    printf("tnl_ifname: %s\n", cfg.tnl_ifname);
+	pr_info("gtpu_ifname: %s\n", cfg.gtpu_ifname);
+    pr_info("tnl_ifname: %s\n", cfg.tnl_ifname);
 
     if (cfg.src_ip.af == AF_INET) {
         char addr_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &cfg.src_ip.addr.addr4, addr_str, INET_ADDRSTRLEN);
-        printf("src_ip: %s (IPv4)\n", addr_str);
+        pr_info("src_ip: %s (IPv4)\n", addr_str);
     }
     else if (cfg.src_ip.af == AF_INET6) {
         char addr_str[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, &cfg.src_ip.addr.addr6, addr_str, INET6_ADDRSTRLEN);
-        printf("src_ip: %s (IPv6)\n", addr_str);
+        pr_info("src_ip: %s (IPv6)\n", addr_str);
     }
     if (cfg.dest_ip.af == AF_INET) {
         char addr_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &cfg.dest_ip.addr.addr4, addr_str, INET_ADDRSTRLEN);
-        printf("dest_ip: %s (IPv4)\n", addr_str);
+        pr_info("dest_ip: %s (IPv4)\n", addr_str);
     }
     else if (cfg.dest_ip.af == AF_INET6) {
         char addr_str[INET6_ADDRSTRLEN];
@@ -518,12 +517,12 @@ int main(int argc, char **argv)
     else if (cfg.ue_ip.af == AF_INET6) {
         char addr_str[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, &cfg.ue_ip.addr.addr6, addr_str, INET6_ADDRSTRLEN);
-        printf("ue_ip: %s (IPv6)\n", addr_str);
+        pr_info("ue_ip: %s (IPv6)\n", addr_str);
     }
 
-    printf("teid: %u\n", cfg.teid);
-    printf("qfi: %u\n", cfg.qfi);
-    printf("num_ues: %u\n", cfg.num_ues);
+    pr_info("teid: %u\n", cfg.teid);
+    pr_info("qfi: %u\n", cfg.qfi);
+    pr_info("num_ues: %u\n", cfg.num_ues);
 	
 
 	memset(gtpu_ifname, 0, IF_NAMESIZE); /* Can be used uninitialized */

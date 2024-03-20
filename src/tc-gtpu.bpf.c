@@ -260,6 +260,11 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
     if (parse_gtpuhdr(&nh, data_end, &gtpuhdr) < 0)
 		goto out;
     
+    if (gtpuhdr->message_type == 0x1a) { // Error indication
+        bpf_printk("Received GTPU Error indication packet");
+        return TC_ACT_SHOT;
+    }
+
     key = bpf_ntohl(gtpuhdr->teid);
     state = bpf_map_lookup_elem(&ingress_map, &key);
     if (state && state->qfi && state->ifindex) {
@@ -270,7 +275,12 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
         tnl_interface = gtpuhdr->teid; // default ifindex = teid
     }
 
-    // TODO: check if there is payload and send to tnl_interface
+    int roomlen = sizeof(struct ipv4_gtpu_encap);
+    int ret = bpf_skb_adjust_room(skb, -roomlen, BPF_ADJ_ROOM_MAC, 0);
+    if (ret) {
+        bpf_printk("error reducing skb adjust room.\n");
+        return TC_ACT_SHOT;
+    }
 
     // bpf_redirect_peer might be a better call
     return bpf_redirect(tnl_interface, BPF_F_INGRESS);
