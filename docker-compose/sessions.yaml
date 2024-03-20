@@ -7,10 +7,10 @@
       networkInstance: access.oai.org
       localFTEID:
         teid: 1234
-        ip4: 192.168.70.134
+        ip4: 192.168.70.129
       ueIPAddress:
         isDestination: false
-        ip4: 12.1.1.10
+        ip4: 12.1.1.2
     outerHeaderRemoval: OUTER_HEADER_GTPU_UDP_IPV4
     farID: 12
   fars:
@@ -28,7 +28,7 @@
       networkInstance: internet.oai.org
       ueIPAddress:
         isDestination: true
-        ip4: 12.1.1.10
+        ip4: 12.1.1.2
     farID: 13
   fars:
   - farID: 13
@@ -38,5 +38,5 @@
       networkInstance: access.oai.org
       outerHeaderCreation:
         desc: OUTER_HEADER_CREATION_GTPU_UDP_IPV4
-        teid: 4321
-        ip: 192.168.70.1
+        teid: 1234
+        ip: 192.168.70.130

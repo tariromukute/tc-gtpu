@@ -37,8 +37,8 @@ static int verbose = 1;
 
 struct config {
 	/* Define config */
-	char *gtpu_interface;
-	char *tnl_interface;
+	char *gtpu_ifname;
+	char *tnl_ifname;
 	struct ip_addr src_ip;
 	struct ip_addr dest_ip;
 	struct ip_addr ue_ip;
@@ -134,25 +134,25 @@ void parse_cmdline_args(int argc, char **argv,
 				break;
 			case 'g':
                 if (!validate_ifname(optarg)) {
-                    printf("Invalid gtpu_interface name\n");
+                    printf("Invalid gtpu_ifname name\n");
                     usage(argv);
                     exit(EXIT_FAILURE);
                 }
-                cfg->gtpu_interface = optarg;
-                gtpu_ifindex = if_nametoindex(cfg->gtpu_interface);
+                cfg->gtpu_ifname = optarg;
+                gtpu_ifindex = if_nametoindex(cfg->gtpu_ifname);
                 if (gtpu_ifindex == 0) {
-                    printf("Interface %s does not exist\n", cfg->gtpu_interface);
+                    printf("Interface %s does not exist\n", cfg->gtpu_ifname);
                     usage(argv);
                     exit(EXIT_FAILURE);
                 }
                 break;
             case 'i':
                 if (!validate_ifname(optarg)) {
-                    printf("Invalid tnl_interface name\n");
+                    printf("Invalid tnl_ifname name\n");
                     usage(argv);
                     exit(EXIT_FAILURE);
                 }
-                cfg->tnl_interface = optarg;
+                cfg->tnl_ifname = optarg;
                 break;
 			case 's':
                 if (validate_ip_address(optarg, &cfg->src_ip) != 0) {
@@ -192,8 +192,8 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 
 	// Check if all required arguments were provided
-	if (cfg->gtpu_interface == NULL ||
-		cfg->tnl_interface == NULL ||
+	if (cfg->gtpu_ifname == NULL ||
+		cfg->tnl_ifname == NULL ||
 		cfg->src_ip.af == AF_UNSPEC ||
 		cfg->dest_ip.af == AF_UNSPEC ||
 		cfg->ue_ip.af == AF_UNSPEC ||
@@ -288,43 +288,67 @@ static int delete_dummy_interface(const char* ifname) {
 	return ret;
 }
 
+static int tc_dettach_program(struct tc_gtpu_bpf *skel, const char* prog_name, int ifindex, int attach_point) {
+	int err = 0;
+	struct bpf_program *bpf_prog;
+
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook, .ifindex = ifindex,
+                        .attach_point = attach_point);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts, .handle = 1, .priority = 1);
+
+	bpf_prog = bpf_object__find_program_by_name(skel->obj, prog_name);
+	tc_opts.prog_fd = bpf_program__fd(bpf_prog);
+
+	err = bpf_tc_detach(&tc_hook, &tc_opts);
+	if (err)
+		goto out;
+
+out:
+	bpf_tc_hook_destroy(&tc_hook);
+	return err;
+}
+
+static int tc_attach_program(struct tc_gtpu_bpf *skel, const char* prog_name, int ifindex, int attach_point) {
+	int err = 0;
+	struct bpf_program *bpf_prog;
+
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook, .ifindex = ifindex,
+                        .attach_point = attach_point);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts, .handle = 1, .priority = 1);
+
+	bpf_prog = bpf_object__find_program_by_name(skel->obj, prog_name);
+	tc_opts.prog_fd = bpf_program__fd(bpf_prog);
+
+    err = bpf_tc_hook_create(&tc_hook);
+    if (err && err != -EEXIST) {
+        printf("Failed to create TC hook (type: %d) ifindex: %d", attach_point, ifindex);
+		goto cleanup;
+	}
+
+    err = bpf_tc_attach(&tc_hook, &tc_opts);
+    if (err) {
+        printf("Failed to attach TC (type: %d) program: %s, on ifindex: %d", attach_point, prog_name, ifindex);
+		goto cleanup;
+	}
+
+	return err;
+
+cleanup:
+	bpf_tc_hook_destroy(&tc_hook);
+	return err;
+}
+
 static int attach_hooks(int ifindex, struct tc_gtpu_bpf *skel) {
 	int err = 0;
 
 	fprintf(stderr, "Creating for index %d\n", ifindex);
-	DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_ingress, .ifindex = ifindex,
-                        .attach_point = BPF_TC_INGRESS);
-    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_ingress, .handle = 1, .priority = 1);
-
-	DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_egress, .ifindex = ifindex,
-                        .attach_point = BPF_TC_EGRESS);
-    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_egress, .handle = 1, .priority = 1);
-
-	tc_hook_ingress.attach_point = BPF_TC_INGRESS;
-	err = bpf_tc_hook_create(&tc_hook_ingress);
-	if (err && err != -EEXIST) {
-		// err = -errno;
-		fprintf(stderr, "%s: Failed to create BPF_TC_INGRESS hook: %s\n", __func__, strerror(err));
-		goto out;
-	}
-
-	tc_opts_ingress.prog_fd = bpf_program__fd(skel->progs.tnl_if_ingress_fn);
-	err = bpf_tc_attach(&tc_hook_ingress, &tc_opts_ingress);
+	err = tc_attach_program(skel, "tnl_if_ingress_fn", ifindex, BPF_TC_INGRESS);
 	if (err) {
-		fprintf(stderr, "%s: Failed to attach BPF_TC_INGRESS: %d\n", __func__, err);
 		goto out;
 	}
 
-	err = bpf_tc_hook_create(&tc_hook_egress);
-	if (err && err != -EEXIST) {
-		fprintf(stderr, "%s: Failed to create BPF_TC_EGRESS hook: %d\n", __func__, err);
-		goto out;
-	}
-
-	tc_opts_egress.prog_fd = bpf_program__fd(skel->progs.tnl_if_egress_fn);
-	err = bpf_tc_attach(&tc_hook_egress, &tc_opts_egress);
+	err = tc_attach_program(skel, "tnl_if_egress_fn", ifindex, BPF_TC_EGRESS);
 	if (err) {
-		fprintf(stderr, "%s: Failed to attach BPF_TC_EGRESS: %d\n", __func__, err);
 		goto out;
 	}
 
@@ -361,7 +385,7 @@ static int create_ue_interface(char *ifname, char *ue_address, int teid, struct 
         .teid = teid,
         .qfi = cfg->qfi,
     };
-	err = bpf_map_update_elem(bpf_map__fd(skel->maps.egress_map), &teid, &estate, 0);
+	err = bpf_map_update_elem(bpf_map__fd(skel->maps.egress_map), &ifindex, &estate, 0);
 	if (err) {
 		perror("ERROR: bpf_map_update_elem");
 		goto out;
@@ -371,7 +395,7 @@ out:
 	return err;
 }
 
-static void init_tc_gtpu(struct config *cfg) {
+static void tc_gtpu(struct config *cfg) {
     struct tc_gtpu_bpf *skel;
     int err;
 
@@ -380,45 +404,31 @@ static void init_tc_gtpu(struct config *cfg) {
     skel = tc_gtpu_bpf__open();
     if (!skel) {
         perror("Failed to open BPF skeleton");
+		return;
 	}
-
-	skel->rodata->config.gtpu_ifindex = if_nametoindex(cfg->gtpu_interface);
+	int gtpu_ifindex = if_nametoindex(cfg->gtpu_ifname);
+	skel->rodata->config.gtpu_ifindex = gtpu_ifindex;
     skel->rodata->config.daddr.af = cfg->dest_ip.af;
     memcpy(&skel->rodata->config.daddr.addr, & cfg->dest_ip.addr, sizeof(struct ip_addr));
     skel->rodata->config.saddr.af = cfg->src_ip.af;
     memcpy(&skel->rodata->config.saddr.addr, &cfg->src_ip.addr, sizeof(struct ip_addr));
 
 	err = tc_gtpu_bpf__load(skel);
-	if (err)
+	if (err) {
 		perror("Failed to load TC hook");
+		tc_gtpu_bpf__destroy(skel);
+		return;
+	}
 
-    DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_ingress, .ifindex = if_nametoindex(cfg->gtpu_interface),
-                        .attach_point = BPF_TC_INGRESS);
-    DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_ingress, .handle = 1, .priority = 1);
-	DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook_egress, .ifindex = if_nametoindex(cfg->gtpu_interface),
-                        .attach_point = BPF_TC_EGRESS);
-	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts_egress, .handle = 1, .priority = 1);
+	err = tc_attach_program(skel, "gtpu_ingress_fn", gtpu_ifindex, BPF_TC_INGRESS);
+	if (err) {
+		goto cleanup;
+	}
 
-    // Set the GTP-U
-    tc_hook_ingress.ifindex = if_nametoindex(cfg->gtpu_interface);
-    tc_hook_ingress.attach_point = BPF_TC_INGRESS;
-    err = bpf_tc_hook_create(&tc_hook_ingress);
-    if (err && err != -EEXIST)
-        perror("Failed to create TC hook");
-
-    tc_opts_ingress.prog_fd = bpf_program__fd(skel->progs.gtpu_ingress_fn);
-    err = bpf_tc_attach(&tc_hook_ingress, &tc_opts_ingress);
-    if (err)
-        perror("Failed to attach TC");
-
-    err = bpf_tc_hook_create(&tc_hook_egress);
-    if (err && err != -EEXIST)
-        perror("Failed to create TC hook");
-
-    tc_opts_egress.prog_fd = bpf_program__fd(skel->progs.gtpu_egress_fn);
-    err = bpf_tc_attach(&tc_hook_egress, &tc_opts_egress);
-    if (err)
-        perror("Failed to attach TC");
+	err = tc_attach_program(skel, "gtpu_egress_fn", gtpu_ifindex, BPF_TC_EGRESS);
+	if (err) {
+		goto cleanup;
+	}
 
     // Create dummy interface for each UE
     __u32 num_ues = cfg->num_ues;
@@ -427,7 +437,7 @@ static void init_tc_gtpu(struct config *cfg) {
     for (int i = 0; i < num_ues; ++i) {
         teid = cfg->teid + i;
         char ifname[IF_NAMESIZE];
-        snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_interface, i);
+        snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_ifname, i);
 
         // Increment the last byte of IP address
         if (cfg->ue_ip.af == AF_INET) {
@@ -448,34 +458,22 @@ static void init_tc_gtpu(struct config *cfg) {
 
     printf("Successfully started! To test: \n" 
 		"\t 1. RUN: `cat /sys/kernel/debug/tracing/trace_pipe` to see output of the BPF program.\n"
-		"\t 2. RUN: `ping -I %s0 8.8.8.8 -c 5` to send packet via the gtpu tunnel\n", cfg->tnl_interface);
+		"\t 2. RUN: `ping -I %s0 8.8.8.8 -c 5` to send packet via the gtpu tunnel\n", cfg->tnl_ifname);
 
     while (!exiting) {
         fprintf(stderr, ".");
         sleep(1);
     }
 
-    tc_opts_ingress.flags = tc_opts_ingress.prog_fd = tc_opts_ingress.prog_id = 0;
-    err = bpf_tc_detach(&tc_hook_ingress, &tc_opts_ingress);
-    if (err) {
-        perror("Failed to detach TC ingress");
-	}
-
-	tc_opts_egress.flags = tc_opts_egress.prog_fd = tc_opts_egress.prog_id = 0;
-    err = bpf_tc_detach(&tc_hook_egress, &tc_opts_egress);
-    if (err) {
-        perror("Failed to detach TC ingress");
-	}
-
 	for (int i = 0; i < num_ues; ++i) {
         char ifname[IF_NAMESIZE];
-        snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_interface, i);
+        snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_ifname, i);
         delete_dummy_interface(ifname);
     }
 
-// cleanup:
-    bpf_tc_hook_destroy(&tc_hook_ingress);
-	bpf_tc_hook_destroy(&tc_hook_egress);
+cleanup:
+	tc_dettach_program(skel, "gtpu_ingress_fn", gtpu_ifindex, BPF_TC_INGRESS);
+	tc_dettach_program(skel, "gtpu_egress_fn", gtpu_ifindex, BPF_TC_EGRESS);
     tc_gtpu_bpf__destroy(skel);
 }
 
@@ -489,8 +487,8 @@ int main(int argc, char **argv)
 	struct config cfg = {0};
 	parse_cmdline_args(argc, argv, long_options, &cfg, __doc__);
 
-	printf("gtpu_interface: %s\n", cfg.gtpu_interface);
-    printf("tnl_interface: %s\n", cfg.tnl_interface);
+	printf("gtpu_ifname: %s\n", cfg.gtpu_ifname);
+    printf("tnl_ifname: %s\n", cfg.tnl_ifname);
 
     if (cfg.src_ip.af == AF_INET) {
         char addr_str[INET_ADDRSTRLEN];
@@ -532,8 +530,8 @@ int main(int argc, char **argv)
 	memset(tnl_ifname, 0, IF_NAMESIZE); /* Can be used uninitialized */
 
 	// Setup gtpu interface
-	snprintf(gtpu_ifname, sizeof(gtpu_ifname), "%s", cfg.gtpu_interface);
+	snprintf(gtpu_ifname, sizeof(gtpu_ifname), "%s", cfg.gtpu_ifname);
 
-	init_tc_gtpu(&cfg);
+	tc_gtpu(&cfg);
 	return 0;
 }

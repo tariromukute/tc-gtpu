@@ -270,6 +270,8 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
         tnl_interface = gtpuhdr->teid; // default ifindex = teid
     }
 
+    // TODO: check if there is payload and send to tnl_interface
+
     // bpf_redirect_peer might be a better call
     return bpf_redirect(tnl_interface, BPF_F_INGRESS);
 

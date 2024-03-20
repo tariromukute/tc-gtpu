@@ -99,7 +99,7 @@ tcpdump -i eth0 -w tmp.pcap
 Or
 
 ```bash
-./tc-gtpu -g eth0 -i uegtp -s 172.0.0.1 -d 172.0.0.2 -u 12.1.1.2 -t 1234 -q 9 -n 2
+./tc-gtpu -g eth0 -i uegtp -s 192.168.70.130 -d 192.168.70.134 -u 12.1.1.2 -t 1234 -q 9 -n 2
 ```
 
 ```bash
