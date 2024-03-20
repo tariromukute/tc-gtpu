@@ -4,10 +4,10 @@ services:
         container_name: "pfcp-kitchen-sink"
         image: tariromukute/pfcp-kitchen-sink:latest
         volumes:
-            - ./sessions-oai-upf.yaml:/app/sessions.yaml
+            - ./sessions-eupf.yaml:/app/sessions.yaml
         command: ./pfcpclient -r 192.168.70.134:8805 -s sessions.yaml
         depends_on:
-            - oai-upf
+            - edgecomllc-eupf
         networks:
             public_net:
                 ipv4_address: 192.168.70.131
@@ -26,35 +26,46 @@ services:
         # cap_drop:
         #     - ALL
         depends_on:
-            - oai-upf
+            - edgecomllc-eupf
             - pfcp-kitchen-sink
         networks:
             public_net:
                 ipv4_address: 192.168.70.130
-    oai-upf:
-        container_name: "oai-upf"
-        image: oaisoftwarealliance/oai-upf:develop
-        volumes:
-            - ./basic_config.yaml:/openair-upf/etc/config.yaml
-            - /Users/tariromukute/Documents/phd/oai-cn5g-upf:/home
+    edgecomllc-eupf:
+        container_name: "edgecomllc-eupf"
+        image: ghcr.io/edgecomllc/eupf:main
         environment:
-            - TZ=Europe/Paris
+            - UPF_INTERFACE_NAME=eth1,eth0
+            - UPF_XDP_ATTACH_MODE=generic
+            - UPF_API_ADDRESS=:8081
+            - UPF_PFCP_ADDRESS=:8805
+            - UPF_METRICS_ADDRESS=:9091
+            - UPF_PFCP_NODE_ID=192.168.70.134
+            - UPF_N3_ADDRESS=192.168.70.134
         cap_add:
             - NET_ADMIN
             - SYS_ADMIN
-        cap_drop:
-            - ALL
+            - SYS_RESOURCE # setrlimit
+        # cap_drop:
+        #     - ALL
+        ports:
+            - "8880:8080"
+            - "9090:9090"
+        sysctls:
+            - net.ipv4.conf.all.forwarding=1
         privileged: true
         networks:
             public_net:
                 ipv4_address: 192.168.70.134
+            n6_net:
+                ipv4_address: 192.168.72.134
     oai-ext-dn:
         privileged: true
         init: true
         container_name: oai-ext-dn
         image: oaisoftwarealliance/trf-gen-cn5g:latest
         environment:
-            - UPF_FQDN=oai-upf
+            - UPF_FQDN=edgecomllc-eupf
             - UE_NETWORK=12.1.1.0/24
             - USE_FQDN=yes
         healthcheck:
@@ -65,6 +76,8 @@ services:
         networks:
             public_net:
                 ipv4_address: 192.168.70.135
+            n6_net:
+                ipv4_address: 192.168.72.135
 networks:
     public_net:
         driver: bridge
@@ -75,7 +88,6 @@ networks:
         driver_opts:
             com.docker.network.bridge.name: "demo-oai"
     n3_net:
-        driver: bridge
         name: demo-oai-n3-net
         ipam:
             config:
@@ -83,9 +95,10 @@ networks:
         driver_opts:
             com.docker.network.bridge.name: "demo-n3"
     n6_net:
-        driver: bridge
         name: demo-oai-n6-net
         ipam:
+            options:
+                iface: n6
             config:
                 - subnet: 192.168.72.128/26
         driver_opts:
