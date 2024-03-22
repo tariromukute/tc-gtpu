@@ -6,6 +6,7 @@
 #include <linux/udp.h>
 #include <linux/tcp.h>
 #include <linux/in.h>
+#include <linux/if_ether.h>
 #include "gtpu.h"
 
 struct ipv4_gtpu_encap {
@@ -27,6 +28,7 @@ struct ipv6_gtpu_encap {
 struct ingress_state {
     __u32 ifindex;
     __u32 qfi;
+    unsigned char	if_mac[ETH_ALEN];
 };
 
 struct egress_state {
@@ -43,6 +45,7 @@ struct ip_addr {
 };
 
 struct gtpu_config {
+    int verbose_level;
     int gtpu_ifindex;
     struct ip_addr saddr;
     struct ip_addr daddr;

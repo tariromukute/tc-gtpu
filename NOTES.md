@@ -99,7 +99,7 @@ tcpdump -i eth0 -w tmp.pcap
 Or
 
 ```bash
-./tc-gtpu -g eth0 -i uegtp -s 192.168.70.130 -d 192.168.70.134 -u 12.1.1.2 -t 1234 -q 9 -n 2
+./tc-gtpu -g eth0 -i uegtp -s 192.168.70.130 -d 192.168.70.134 -u 12.1.1.2 --ul-teid 1234 --dl-teid 1234 -q 9 -n 1 -f /home/tu-gtpu.pcap -vvv
 ```
 
 ```bash
@@ -112,4 +112,5 @@ docker run -it --rm --privileged --pid=host ubuntu:latest nsenter -t 1 -m -u -n 
 - https://github.com/edgecomllc/eupf/issues/509
 - http://arthurchiao.art/blog/differentiate-bpf-redirects/
 - https://patchwork.kernel.org/project/netdevbpf/patch/20210512103451.989420-3-memxor@gmail.com/
+- https://lore.kernel.org/bpf/d5995641-9ce9-9cad-7a58-999614550963@fb.com/
 

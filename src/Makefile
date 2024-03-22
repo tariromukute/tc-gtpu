@@ -111,7 +111,7 @@ $(OUTPUT)/%.o: %.c $(wildcard %.h) | $(OUTPUT)
 # Build application binary
 $(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) $(UTIL_OBJS) | $(OUTPUT)
 	$(call msg,BINARY,$@)
-	$(Q)$(CC) $(CFLAGS) $^ $(ALL_LDFLAGS) -lelf -lz -o $@
+	$(Q)$(CC) $(CFLAGS) $^ $(ALL_LDFLAGS) -lelf -lz -lpcap -o $@
 
 # delete failed targets
 .DELETE_ON_ERROR:

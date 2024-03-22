@@ -22,6 +22,24 @@ static const char *__doc__=
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <signal.h>
+#include <stdio.h>
+#include <sys/types.h>    
+
+#include <linux/bpf.h>
+#include <errno.h>
+#include <assert.h>
+#include <sys/sysinfo.h>
+#include <sys/resource.h>
+#include <libgen.h>
+#include <linux/if_link.h>
+#include <poll.h>
+#include <sys/mman.h>
+#define PCAP_DONT_INCLUDE_PCAP_BPF_H
+#include <pcap/pcap.h>
+#include <pcap/dlt.h>
+#include <linux/perf_event.h>
+#include <sys/syscall.h>
+#include <linux/limits.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -34,6 +52,20 @@ static const char *__doc__=
 #define CMD_MAX     2048
 #define CMD_MAX_TC  256
 
+static pcap_t* pd;
+static pcap_dumper_t* pdumper;
+static unsigned int pcap_pkts;
+
+struct perf_buffer *pb;
+
+static const char *default_filename = "tu-gtpu.pcap";
+static char pcap_filename[PATH_MAX];
+#define SAMPLE_SIZE 1024
+#define NANOSECS_PER_USEC 1000
+
+static volatile sig_atomic_t exiting = 0;
+
+static int verbose_level = 0;
 struct config {
 	/* Define config */
 	char *gtpu_ifname;
@@ -41,7 +73,8 @@ struct config {
 	struct ip_addr src_ip;
 	struct ip_addr dest_ip;
 	struct ip_addr ue_ip;
-	__u32 teid;
+	__u32 ul_teid;
+	__u32 dl_teid;
 	__u32 qfi;
 	__u32 num_ues;
 };
@@ -90,9 +123,12 @@ static const struct option long_options[] = {
 	{"src-ip", required_argument,    NULL, 's' },
 	{"dest-ip",    required_argument,    NULL, 'd' },
 	{"ue-ip",    required_argument,    NULL, 'u' },
-	{"teid",    required_argument,    NULL, 't' },
+	{"ul-teid",    required_argument,    NULL, 'p' },
+	{"dl-teid",    required_argument,    NULL, 'l' },
 	{"qfi", required_argument,    NULL, 'q' },
-	{"num-ues", required_argument,    NULL, 'n' },
+	{"num-ues", optional_argument,    NULL, 'n' },
+	{"pcap-file", optional_argument,    NULL, '-f' },
+	{"verbose", optional_argument,    NULL, 'v' },
 	/* HINT assign: optional_arguments with '=' */
 	{0, 0, NULL,  0 }
 };
@@ -125,7 +161,7 @@ void parse_cmdline_args(int argc, char **argv,
 	int opt;
 	unsigned int gtpu_ifindex;
 
-	while ((opt = getopt_long(argc, argv, "hg:i:s:d:u:t:q:n:", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hg:i:s:d:u:t:p:l:q:n:f:v", options, NULL)) != -1) {
 		switch(opt) {
 			case 'h':
 				usage(argv);
@@ -174,8 +210,11 @@ void parse_cmdline_args(int argc, char **argv,
                 }
                 cfg->ue_ip.af = AF_INET;
 				break;
-			case 't':
-                cfg->teid = (__u32) strtoul(optarg, NULL, 0);
+			case 'p':
+                cfg->ul_teid = (__u32) strtoul(optarg, NULL, 0);
+                break;
+			case 'l':
+                cfg->dl_teid = (__u32) strtoul(optarg, NULL, 0);
                 break;
             case 'q':
                 cfg->qfi = (__u32) strtoul(optarg, NULL, 0);
@@ -183,6 +222,15 @@ void parse_cmdline_args(int argc, char **argv,
             case 'n':
                 cfg->num_ues = (__u32) strtoul(optarg, NULL, 0);
                 break;
+			case 'f':
+				strcpy(pcap_filename, optarg);
+                break;
+			case 'v':
+				verbose_level++;
+				if (verbose_level > 3) {
+					verbose_level = 3;
+				}
+            	break;
 			default:
 				usage(argv);
 				exit(EXIT_FAILURE);
@@ -196,20 +244,22 @@ void parse_cmdline_args(int argc, char **argv,
 		cfg->src_ip.af == AF_UNSPEC ||
 		cfg->dest_ip.af == AF_UNSPEC ||
 		cfg->ue_ip.af == AF_UNSPEC ||
-		cfg->teid == 0 ||
+		cfg->ul_teid == 0 ||
+		cfg->dl_teid == 0 ||
 		cfg->qfi == 0 ||
 		cfg->num_ues == 0)
 	{
 		usage(argv);
 		exit(EXIT_FAILURE);
 	}
-}
 
-static volatile sig_atomic_t exiting = 0;
+	if (cfg->num_ues == 0) {
+		cfg->num_ues = 1; // Default value
+	}
 
-static void sig_int(int signo)
-{
-	exiting = 1;
+	if (strlen(pcap_filename) == 0) {
+		strcpy(pcap_filename, default_filename);
+	}
 }
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
@@ -217,6 +267,18 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 	return vfprintf(stderr, format, args);
 }
 
+static int set_if_mac(const char *ifname, __u8 m_addr[ETH_ALEN]) {
+	struct ifreq s;
+    int fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+
+    strcpy(s.ifr_name, ifname);
+    if (0 == ioctl(fd, SIOCGIFHWADDR, &s)) {        
+		memcpy(m_addr, s.ifr_addr.sa_data, ETH_ALEN);
+        return 0;
+    }
+
+    return -1;
+}
 static int create_dummy_interface(const char* ifname, const char* ip_address) {
 	char cmd[CMD_MAX];
 	int ret = 0;
@@ -355,7 +417,7 @@ out:
 	return err;
 }
 
-static int create_ue_interface(char *ifname, char *ue_address, int teid, struct config *cfg,
+static int create_ue_interface(char *ifname, char *ue_address, int ul_teid, int dl_teid, struct config *cfg,
                                  struct tc_gtpu_bpf *skel) {
     int err = 0;
 
@@ -374,14 +436,19 @@ static int create_ue_interface(char *ifname, char *ue_address, int teid, struct 
         .ifindex = ifindex,
         .qfi = cfg->qfi,
     };
-	err = bpf_map_update_elem(bpf_map__fd(skel->maps.ingress_map), &teid, &istate, 0);
+	err = set_if_mac(ifname, istate.if_mac);
+	if (err) {
+		pr_warn("Failed to set if mac address");
+	}
+	
+	err = bpf_map_update_elem(bpf_map__fd(skel->maps.ingress_map), &dl_teid, &istate, 0);
 	if (err) {
 		pr_warn("ERROR: bpf_map_update_elem");
 		goto out;
 	}
 
     struct egress_state estate = {
-        .teid = teid,
+        .teid = ul_teid,
         .qfi = cfg->qfi,
     };
 	err = bpf_map_update_elem(bpf_map__fd(skel->maps.egress_map), &ifindex, &estate, 0);
@@ -392,6 +459,88 @@ static int create_ue_interface(char *ifname, char *ue_address, int teid, struct 
 
 out:
 	return err;
+}
+
+static inline int
+sys_perf_event_open(struct perf_event_attr *attr,
+                  pid_t pid, int cpu, int group_fd,
+                   unsigned long flags)
+{
+       return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
+}
+
+static void print_bpf_output(void *ctx, int cpu, void *data, __u32 size)
+{
+	struct {
+		__u16 cookie;
+		__u16 pkt_len;
+		__u8  pkt_data[SAMPLE_SIZE];
+	} __attribute__((packed)) *e = data;
+	struct pcap_pkthdr h = {
+		.caplen	= e->pkt_len,
+		.len	= e->pkt_len,
+	};
+	struct timespec ts;
+	int err;
+
+	if (e->cookie != 0xdead)
+		printf("BUG cookie %x sized %d\n",
+		       e->cookie, size);
+
+	err = clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (err < 0)
+		printf("Error with clock_gettime! (%i)\n", err);
+
+	h.ts.tv_sec  = ts.tv_sec;
+	h.ts.tv_usec = ts.tv_nsec / NANOSECS_PER_USEC;
+
+	pcap_dump((u_char *) pdumper, &h, e->pkt_data);
+	pcap_pkts++;
+}
+
+static void clean_perf_pcap () {
+	perf_buffer__free(pb);
+	pcap_dump_close(pdumper);
+	pcap_close(pd);
+	printf("\n%u packet samples stored in %s\n", pcap_pkts, pcap_filename);
+}
+
+static int set_perf_pcap(struct tc_gtpu_bpf *skel) {
+	int pcap_map_fd = bpf_map__fd(skel->maps.pcap_map);
+	pb = perf_buffer__new(pcap_map_fd, 8, print_bpf_output, NULL, NULL, NULL);
+	int err = libbpf_get_error(pb);
+	if (err) {
+		fprintf(stderr, "perf_buffer setup failed");
+		goto cleanup;
+	}
+
+	pd = pcap_open_dead(DLT_EN10MB, 65535);
+	if (!pd) {
+		perf_buffer__free(pb);
+		goto cleanup;
+	}
+
+	pdumper = pcap_dump_open(pd, pcap_filename);
+	if (!pdumper) {
+		perf_buffer__free(pb);
+		pcap_close(pd);
+		goto cleanup;
+	}
+
+	printf("Capturing packets into %s\n", pcap_filename);
+	return 0;
+
+cleanup:
+	printf("Failed to set up perf pcap");
+	clean_perf_pcap();
+	return -1;
+}
+
+static void sig_handler(int signo)
+{
+	if (verbose_level == LOG_VERBOSE)
+		clean_perf_pcap();
+	exiting = 1;
 }
 
 static void tc_gtpu(struct config *cfg) {
@@ -411,6 +560,7 @@ static void tc_gtpu(struct config *cfg) {
     memcpy(&skel->rodata->config.daddr.addr, & cfg->dest_ip.addr, sizeof(struct ip_addr));
     skel->rodata->config.saddr.af = cfg->src_ip.af;
     memcpy(&skel->rodata->config.saddr.addr, &cfg->src_ip.addr, sizeof(struct ip_addr));
+	skel->rodata->config.verbose_level = verbose_level;
 
 	err = tc_gtpu_bpf__load(skel);
 	if (err) {
@@ -432,9 +582,10 @@ static void tc_gtpu(struct config *cfg) {
     // Create dummy interface for each UE
     __u32 num_ues = cfg->num_ues;
     char ue_address[INET6_ADDRSTRLEN];
-    int teid;
+    int ul_teid, dl_teid;
     for (int i = 0; i < num_ues; ++i) {
-        teid = cfg->teid + i;
+        ul_teid = cfg->ul_teid + i;
+		dl_teid = cfg->dl_teid + i;
         char ifname[IF_NAMESIZE];
         snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_ifname, i);
 
@@ -449,20 +600,28 @@ static void tc_gtpu(struct config *cfg) {
             *last_byte += (__u8)i;
         }
 
-        create_ue_interface(ifname, ue_address, teid, cfg, skel);
+        create_ue_interface(ifname, ue_address, ul_teid, dl_teid, cfg, skel);
     }
 
-    if (signal(SIGINT, sig_int) == SIG_ERR)
-        pr_warn("Can't set signal handler");
+	if (verbose_level == LOG_VERBOSE)
+		set_perf_pcap(skel);
+	if (signal(SIGINT, sig_handler) ||
+	    signal(SIGHUP, sig_handler) ||
+	    signal(SIGTERM, sig_handler)) {
+		fprintf(stderr, "Can't set signal handler");
+		goto cleanup;
+	}
 
     printf("Successfully started! To test: \n" 
 		"\t 1. RUN: `cat /sys/kernel/debug/tracing/trace_pipe` to see output of the BPF program.\n"
 		"\t 2. RUN: `ping -I %s0 8.8.8.8 -c 5` to send packet via the gtpu tunnel\n", cfg->tnl_ifname);
 
-    while (!exiting) {
-        fprintf(stderr, ".");
-        sleep(1);
-    }
+	while (true) {
+		if (verbose_level == LOG_VERBOSE && ((err = perf_buffer__poll(pb, 1000)) < 0 && exiting))
+			break;
+		else if (exiting)
+			break;
+	}
 
 	for (int i = 0; i < num_ues; ++i) {
         char ifname[IF_NAMESIZE];
@@ -520,7 +679,7 @@ int main(int argc, char **argv)
         pr_info("ue_ip: %s (IPv6)\n", addr_str);
     }
 
-    pr_info("teid: %u\n", cfg.teid);
+    pr_info("teid: %u\n", cfg.ul_teid);
     pr_info("qfi: %u\n", cfg.qfi);
     pr_info("num_ues: %u\n", cfg.num_ues);
 	

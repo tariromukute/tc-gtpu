@@ -10,6 +10,7 @@
 #include <linux/udp.h>
 #include <linux/tcp.h>
 #include <linux/in.h>
+#include "logging.h"
 #include "tc-gtpu.h"
 #include "parsing_helpers.h"
 
@@ -23,6 +24,17 @@
 #define __section(x) __attribute__((section(x), used))
 
 #define DEFAULT_QFI 9
+
+#define SAMPLE_SIZE 1024ul
+#define MAX_CPUS 128
+
+#define min(x, y) ((x) < (y) ? (x) : (y))
+
+/* Metadata will be in the perf event before the packet data. */
+struct S {
+	__u16 cookie;
+	__u16 pkt_len;
+} __attribute__((__packed__));;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -40,6 +52,13 @@ struct {
     // __uint(pinning, LIBBPF_PIN_BY_NAME);
 } egress_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__type(key, int);
+	__type(value, __u32);
+	__uint(max_entries, MAX_CPUS);
+} pcap_map SEC(".maps");
+
 const volatile struct gtpu_config config;
 
 static struct ipv4_gtpu_encap ipv4_gtpu_encap = {
@@ -49,7 +68,7 @@ static struct ipv4_gtpu_encap ipv4_gtpu_encap = {
     .ipv4h.protocol = IPPROTO_UDP,
     .ipv4h.saddr = bpf_htonl(0x0a000304), // 10.0.3.4
     .ipv4h.daddr = bpf_htonl(0x0a000305), // 10.0.3.5
-    .ipv4h.check = 0, // bpf_htons(0x609b),
+    .ipv4h.check = 0,
 
     .udp.source = bpf_htons(GTP_UDP_PORT),
 	.udp.dest = bpf_htons(GTP_UDP_PORT),
@@ -113,6 +132,29 @@ static inline void ipv4_csum_inline(
     *csum = csum_fold_helper(*csum);
 }
 
+int handle_perf_pcap(struct __sk_buff *skb) {
+    void *data_end = (void *)(unsigned long long)skb->data_end;
+	void *data = (void *)(unsigned long long)skb->data;
+    
+    __u64 flags = BPF_F_CURRENT_CPU;
+    __u16 sample_size = (__u16)(data_end - data);
+    int ret;
+    struct S metadata;
+
+    metadata.cookie = 0xdead;
+    metadata.pkt_len = min(sample_size, SAMPLE_SIZE);
+
+    flags |= (__u64)sample_size << 32;
+
+    ret = bpf_perf_event_output(skb, &pcap_map, flags,
+                    &metadata, sizeof(metadata));
+
+    if (ret) {
+	    bpf_printk("perf_event_output failed: %d\n", ret);
+    }
+
+    return ret;
+}
 
 SEC("tc/ingress")
 int tnl_if_ingress_fn(struct __sk_buff *skb)
@@ -128,11 +170,15 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
 	void *data = (void *)(unsigned long long)skb->data;
 	struct ethhdr *eth = data;
 
-	if (data + sizeof(struct ethhdr) > data_end)
+	if (data + sizeof(struct ethhdr) > data_end) {
+        bpf_printk("Invalid eth header");
 		return TC_ACT_SHOT;
+    }
 
+    if (config.verbose_level == LOG_VERBOSE)
+        handle_perf_pcap(skb);
+    
 	if (eth->h_proto == ___constant_swab16(ETH_P_IP)) {
-        bpf_printk("Got IP packet");
 		return TC_ACT_OK;
     } else {
 		return TC_ACT_OK;
@@ -155,6 +201,8 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
     bpf_printk("Received packet on tnl_if_egress\n");
     void *data_end = (void *)(unsigned long long)skb->data_end;
     void *data = (void *)(unsigned long long)skb->data;
+    int eth_type;
+    struct hdr_cursor nh = { .pos = data };
     struct ethhdr *eth = data;
     __u64 csum = 0;
     __u32 qfi, teid;
@@ -163,57 +211,56 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
 
     int payload_len = (data_end - data) - sizeof(struct ethhdr);
 
-    if (data + sizeof(struct ethhdr) > data_end) {
-        bpf_printk("error data less than eth header\n");
+    eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type != bpf_htons(ETH_P_IP))
+		goto out;
+
+    if (config.verbose_level == LOG_VERBOSE)
+        handle_perf_pcap(skb);
+    
+    // Logic to fetch QFI and TEID from maps or use defaults
+    state = bpf_map_lookup_elem(&egress_map, &key);
+    if (state && state->teid && state->qfi) {
+        qfi = state->qfi;
+        teid = state->teid;
+    } else {
+        qfi = DEFAULT_QFI;
+        teid = skb->ifindex;  // Use interface index as default TEID
+    }
+        
+    int roomlen = sizeof(struct ipv4_gtpu_encap);
+    int ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, 0);
+    if (ret) {
+        bpf_printk("error calling skb adjust room.\n");
         return TC_ACT_SHOT;
     }
 
-    if (eth->h_proto == ___constant_swab16(ETH_P_IP)) {
-        // Logic to fetch QFI and TEID from maps or use defaults
-        state = bpf_map_lookup_elem(&egress_map, &key);
-        if (state && state->teid && state->qfi) {
-            qfi = state->qfi;
-            teid = state->teid;
-        } else {
-            qfi = DEFAULT_QFI;
-            teid = skb->ifindex;  // Use interface index as default TEID
-        }
-            
-        int roomlen = sizeof(struct ipv4_gtpu_encap);
-        int ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, 0);
-        if (ret) {
-            bpf_printk("error calling skb adjust room.\n");
-            return TC_ACT_SHOT;
-        }
+    // Adjust pointers to new packet location after possible linearization
+    data_end = (void *)(unsigned long long)skb->data_end;
+    data = (void *)(unsigned long long)skb->data;
+    eth = data;
 
-        // Adjust pointers to new packet location after possible linearization
-        data_end = (void *)(unsigned long long)skb->data_end;
-        data = (void *)(unsigned long long)skb->data;
-        eth = data;
+    ipv4_gtpu_encap.ipv4h.daddr = config.daddr.addr.addr4.s_addr;
+    ipv4_gtpu_encap.ipv4h.saddr = config.saddr.addr.addr4.s_addr;
+    ipv4_gtpu_encap.ipv4h.tot_len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len);
+    
+    ipv4_gtpu_encap.udp.len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len - sizeof(struct iphdr));
 
-        ipv4_gtpu_encap.ipv4h.daddr = config.daddr.addr.addr4.s_addr;
-        ipv4_gtpu_encap.ipv4h.saddr = config.saddr.addr.addr4.s_addr;
-        ipv4_gtpu_encap.ipv4h.tot_len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len);
-        
-        ipv4_gtpu_encap.udp.len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len - sizeof(struct iphdr));
+    ipv4_gtpu_encap.gtpu.teid = bpf_htonl(teid);
+    ipv4_gtpu_encap.gtpu.message_length = bpf_htons(payload_len + sizeof(struct gtpu_hdr_ext) + sizeof(struct gtp_pdu_session_container));
 
-        ipv4_gtpu_encap.gtpu.teid = bpf_htonl(teid);
-        ipv4_gtpu_encap.gtpu.message_length = bpf_htons(payload_len + sizeof(struct gtpu_hdr_ext) + sizeof(struct gtp_pdu_session_container));
-
-        int offset = sizeof(struct ethhdr);
-        ret = bpf_skb_store_bytes(skb, offset, &ipv4_gtpu_encap, roomlen, 0);
-        if (ret) {
-            bpf_printk("error storing ip header\n");
-            return TC_ACT_SHOT;
-        }
-        
-        bpf_printk("Redirecting to gtpu interface\n");
-        return bpf_redirect_neigh(config.gtpu_ifindex, NULL, 0, 0);
-
-    } else {
-        bpf_printk("error: protocol not ETH_P_IP, it is: %d\n", eth->h_proto);
-        return TC_ACT_OK;
+    int offset = sizeof(struct ethhdr);
+    ret = bpf_skb_store_bytes(skb, offset, &ipv4_gtpu_encap, roomlen, 0);
+    if (ret) {
+        bpf_printk("error storing ip header\n");
+        return TC_ACT_SHOT;
     }
+    
+    bpf_printk("Redirecting to gtpu interface\n");
+    return bpf_redirect_neigh(config.gtpu_ifindex, NULL, 0, 0);
+
+out:
+    return TC_ACT_OK;
 }
 
 
@@ -247,6 +294,9 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
 	if (eth_type != bpf_htons(ETH_P_IP))
 		goto out;
 
+    if (config.verbose_level == LOG_VERBOSE)
+        handle_perf_pcap(skb);
+
 	ip_type = parse_iphdr(&nh, data_end, &iphdr);
 	if (ip_type != IPPROTO_UDP)
 		goto out;
@@ -260,10 +310,8 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
     if (parse_gtpuhdr(&nh, data_end, &gtpuhdr) < 0)
 		goto out;
     
-    if (gtpuhdr->message_type == 0x1a) { // Error indication
-        bpf_printk("Received GTPU Error indication packet");
+    if (gtpuhdr->message_type == 0x1a) // Error indication
         return TC_ACT_SHOT;
-    }
 
     key = bpf_ntohl(gtpuhdr->teid);
     state = bpf_map_lookup_elem(&ingress_map, &key);
@@ -282,7 +330,21 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
         return TC_ACT_SHOT;
     }
 
-    // bpf_redirect_peer might be a better call
+    // Adjust pointers to new packet location after possible linearization
+    data_end = (void *)(unsigned long long)skb->data_end;
+    data = (void *)(unsigned long long)skb->data;
+    eth = data;
+
+    nh.pos = data;
+
+    eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type != bpf_htons(ETH_P_IP))
+		goto out;
+
+    if (state && state->qfi && state->ifindex) {
+        __builtin_memcpy(eth->h_dest, state->if_mac, ETH_ALEN);
+    }
+
     return bpf_redirect(tnl_interface, BPF_F_INGRESS);
 
 out:
@@ -303,7 +365,7 @@ int gtpu_egress_fn(struct __sk_buff *skb)
 	void *data = (void *)(unsigned long long)skb->data;
     int eth_type, ip_type, err;
     struct hdr_cursor nh = { .pos = data };
-	struct ethhdr *eth; // = data;
+	struct ethhdr *eth;
     struct gtpuhdr *ghdr;
 	struct gtp_pdu_session_container *pdu;
 	struct iphdr *iphdr;
@@ -313,6 +375,9 @@ int gtpu_egress_fn(struct __sk_buff *skb)
     eth_type = parse_ethhdr(&nh, data_end, &eth);
 	if (eth_type != bpf_htons(ETH_P_IP))
 		goto out;
+
+    if (config.verbose_level == LOG_VERBOSE)
+        handle_perf_pcap(skb);
 
 	ip_type = parse_iphdr(&nh, data_end, &iphdr);
 	if (ip_type != IPPROTO_UDP)
@@ -327,7 +392,6 @@ int gtpu_egress_fn(struct __sk_buff *skb)
     ipv4_csum_inline(iphdr, &csum);
     iphdr->check = csum;
 
-	bpf_printk("Got GTPU packet on egress");
 out:
     return TC_ACT_OK;
 };

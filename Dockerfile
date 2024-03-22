@@ -5,7 +5,7 @@ WORKDIR /app
 
 RUN apt-get update && \
     apt-get install -y clang llvm make git \
-    libelf1 libelf-dev zlib1g-dev gcc pkg-config && \
+    libelf1 libelf-dev zlib1g-dev gcc pkg-config libpcap-dev && \
     rm -rf /var/lib/apt/lists/*
 
 COPY . ./
