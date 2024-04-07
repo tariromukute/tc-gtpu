@@ -5,8 +5,13 @@ WORKDIR /app
 
 RUN apt-get update && \
     apt-get install -y clang llvm make git \
-    libelf1 libelf-dev zlib1g-dev gcc pkg-config libpcap-dev && \
-    rm -rf /var/lib/apt/lists/*
+    libelf1 libelf-dev zlib1g-dev gcc pkg-config libpcap-dev
+
+RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+    apt-get install libc6-dev-i386; \
+fi
+
+RUN rm -rf /var/lib/apt/lists/*
 
 COPY . ./
 

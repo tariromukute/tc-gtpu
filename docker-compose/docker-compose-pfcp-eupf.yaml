@@ -12,12 +12,12 @@ services:
             public_net:
                 ipv4_address: 192.168.70.131
     tc-gtpu-tnl:
+        privileged: true
         container_name: "tc-gtpu-tnl"
         image: tariromukute/tc-gtpu:latest
         command: tail -f /dev/null
         volumes:
             - /sys/kernel/debug/:/sys/kernel/debug/
-            - /Users/tariromukute/Documents/phd/tc-gtpu:/home
         devices:
             - /dev/net/tun:/dev/net/tun
         cap_add:

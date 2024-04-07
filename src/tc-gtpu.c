@@ -73,6 +73,7 @@ struct config {
 	struct ip_addr src_ip;
 	struct ip_addr dest_ip;
 	struct ip_addr ue_ip;
+	struct ip_addr bridge_address;
 	__u32 ul_teid;
 	__u32 dl_teid;
 	__u32 qfi;
@@ -123,6 +124,7 @@ static const struct option long_options[] = {
 	{"src-ip", required_argument,    NULL, 's' },
 	{"dest-ip",    required_argument,    NULL, 'd' },
 	{"ue-ip",    required_argument,    NULL, 'u' },
+	{"bridge-address", required_argument,    NULL, 'b' },
 	{"ul-teid",    required_argument,    NULL, 'p' },
 	{"dl-teid",    required_argument,    NULL, 'l' },
 	{"qfi", required_argument,    NULL, 'q' },
@@ -161,7 +163,7 @@ void parse_cmdline_args(int argc, char **argv,
 	int opt;
 	unsigned int gtpu_ifindex;
 
-	while ((opt = getopt_long(argc, argv, "hg:i:s:d:u:t:p:l:q:n:f:v", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hg:i:s:d:u:b:t:p:l:q:n:f:v", options, NULL)) != -1) {
 		switch(opt) {
 			case 'h':
 				usage(argv);
@@ -209,6 +211,13 @@ void parse_cmdline_args(int argc, char **argv,
                     exit(EXIT_FAILURE);
                 }
                 cfg->ue_ip.af = AF_INET;
+				break;
+			case 'b':
+				if (inet_pton(AF_INET, optarg, &(cfg->bridge_address.addr.addr4)) <= 0) {
+                    pr_warn("Invalid bridge IP address '%s'\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
+                cfg->bridge_address.af = AF_INET;
 				break;
 			case 'p':
                 cfg->ul_teid = (__u32) strtoul(optarg, NULL, 0);
@@ -349,6 +358,232 @@ static int delete_dummy_interface(const char* ifname) {
 	return ret;
 }
 
+static int create_ns_bridge(const char* name, const char* address) {
+	char cmd[CMD_MAX];
+	int ret = 0;
+
+	// Step 1: Create bridge
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip link add %s type bridge 2> /dev/null",
+		 name);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	// Step 2: Set the bridge up
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip link set %s up 2> /dev/null",
+		 name);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	// Step 3: assign address to bridge
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip a add %s/24 brd + dev %s 2> /dev/null",
+		 address, name);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+	
+	return ret;
+}
+
+static int create_ue_ns(const char* br_postfix, const char* bridge_address, const char* ifname, const char* ip_address) {
+	char cmd[CMD_MAX];
+	int ret = 0;
+	const char* name = ifname;
+
+	// Step 1: Create namespance */
+	printf("======= Name is %s", name);
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip netns add %s 2> /dev/null",
+		 name);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	// Step 2: Create veth pair
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip link add %s_i type veth peer name %s 2> /dev/null",
+		 ifname, ifname);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	// Step 3: Create set the namespace to the veth
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip link set %s_i netns %s 2> /dev/null",
+		 ifname, name);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	// Step x: Set to bridge
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip link set %s master br-%s 2> /dev/null",
+		 ifname, br_postfix);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+	// Step 4: Set the floating veth up
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip link set dev %s up 2> /dev/null",
+		 ifname);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	// Step 5: Set address for the inner veth pair
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip netns exec %s ip addr add %s/24 dev %s_i 2> /dev/null",
+		 name, ip_address, ifname);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	// Step 7: Set the inner veth pair up
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip netns exec %s ip link set %s_i up 2> /dev/null",
+		 name, ifname);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	// Step 8: Set the inner lo interface up
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip netns exec %s ip link set lo up 2> /dev/null",
+		 name);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	// Step 9: Add default namespace
+	
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip netns exec %s ip route add default via %s 2> /dev/null",
+		 name, bridge_address);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	return ret;
+}
+
+static int delete_ue_ns(const char* name) {
+	char cmd[CMD_MAX];
+	int ret = 0;
+
+	// Step 1: Create dummy interface */
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip netns delete %s 2> /dev/null",
+		 name);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	return ret;
+}
+
+static int delete_ns_bridge(const char* name) {
+	char cmd[CMD_MAX];
+	int ret = 0;
+
+	// Step 1: Create dummy interface */
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip link del %s 2> /dev/null",
+		 name);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret)) {
+		pr_debug(
+			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
+			WEXITSTATUS(ret), cmd);
+		exit(EXIT_FAILURE);
+	}
+
+	return ret;
+}
+
 static int tc_dettach_program(struct tc_gtpu_bpf *skel, const char* prog_name, int ifindex, int attach_point) {
 	int err = 0;
 	struct bpf_program *bpf_prog;
@@ -417,11 +652,12 @@ out:
 	return err;
 }
 
-static int create_ue_interface(char *ifname, char *ue_address, int ul_teid, int dl_teid, struct config *cfg,
+static int create_ue_interface(char *br_postfix, char *bridge_address, char *ifname, char *ue_address, int ul_teid, int dl_teid, struct config *cfg,
                                  struct tc_gtpu_bpf *skel) {
     int err = 0;
 
-    create_dummy_interface(ifname, ue_address);
+    // create_dummy_interface(ifname, ue_address);
+	create_ue_ns(br_postfix, bridge_address, ifname, ue_address);
 	int ifindex = if_nametoindex(ifname);
 	if (ifindex == 0) {
 		pr_warn("Interface %s does not exist\n", ifname);
@@ -579,6 +815,16 @@ static void tc_gtpu(struct config *cfg) {
 		goto cleanup;
 	}
 
+	char ifname[IF_NAMESIZE];
+	// Create bridge to add the interfaces to
+	char bridge_address[INET6_ADDRSTRLEN];
+	if (cfg->bridge_address.af == AF_INET) {
+		inet_ntop(AF_INET, &cfg->bridge_address.addr.addr4, bridge_address, INET_ADDRSTRLEN);
+	} else if (cfg->bridge_address.af == AF_INET6) {
+		memcpy(bridge_address, &cfg->bridge_address.addr.addr6, sizeof(struct in6_addr));
+	}
+	snprintf(ifname, sizeof(ifname), "br-%s", cfg->tnl_ifname);
+	create_ns_bridge(ifname, bridge_address);
     // Create dummy interface for each UE
     __u32 num_ues = cfg->num_ues;
     char ue_address[INET6_ADDRSTRLEN];
@@ -586,7 +832,6 @@ static void tc_gtpu(struct config *cfg) {
     for (int i = 0; i < num_ues; ++i) {
         ul_teid = cfg->ul_teid + i;
 		dl_teid = cfg->dl_teid + i;
-        char ifname[IF_NAMESIZE];
         snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_ifname, i);
 
         // Increment the last byte of IP address
@@ -600,7 +845,7 @@ static void tc_gtpu(struct config *cfg) {
             *last_byte += (__u8)i;
         }
 
-        create_ue_interface(ifname, ue_address, ul_teid, dl_teid, cfg, skel);
+        create_ue_interface(cfg->tnl_ifname, bridge_address, ifname, ue_address, ul_teid, dl_teid, cfg, skel);
     }
 
 	if (verbose_level == LOG_VERBOSE)
@@ -626,8 +871,12 @@ static void tc_gtpu(struct config *cfg) {
 	for (int i = 0; i < num_ues; ++i) {
         char ifname[IF_NAMESIZE];
         snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_ifname, i);
-        delete_dummy_interface(ifname);
+        // delete_dummy_interface(ifname);
+		delete_ue_ns(ifname);
     }
+
+	snprintf(ifname, sizeof(ifname), "br-%s", cfg->tnl_ifname);
+	delete_ns_bridge(ifname);
 
 cleanup:
 	tc_dettach_program(skel, "gtpu_ingress_fn", gtpu_ifindex, BPF_TC_INGRESS);
@@ -677,6 +926,16 @@ int main(int argc, char **argv)
         char addr_str[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, &cfg.ue_ip.addr.addr6, addr_str, INET6_ADDRSTRLEN);
         pr_info("ue_ip: %s (IPv6)\n", addr_str);
+    }
+	if (cfg.bridge_address.af == AF_INET) {
+        char addr_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &cfg.bridge_address.addr.addr4, addr_str, INET_ADDRSTRLEN);
+        printf("bridge_address: %s (IPv4)\n", addr_str);
+    }
+    else if (cfg.bridge_address.af == AF_INET6) {
+        char addr_str[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &cfg.bridge_address.addr.addr6, addr_str, INET6_ADDRSTRLEN);
+        pr_info("bridge_address: %s (IPv6)\n", addr_str);
     }
 
     pr_info("teid: %u\n", cfg.ul_teid);

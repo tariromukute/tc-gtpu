@@ -99,11 +99,91 @@ tcpdump -i eth0 -w tmp.pcap
 Or
 
 ```bash
-./tc-gtpu -g eth0 -i uegtp -s 192.168.70.130 -d 192.168.70.134 -u 12.1.1.2 --ul-teid 1234 --dl-teid 1234 -q 9 -n 1 -f /home/tu-gtpu.pcap -vvv
+./tc-gtpu -g eth0 -i uegtp -s 192.168.70.130 -d 192.168.70.134 -u 12.1.1.2 -b 12.1.1.1 --ul-teid 1234 --dl-teid 1234 -q 9 -n 2 -f /home/tu-gtpu.pcap -vvv
 ```
 
 ```bash
 docker run -it --rm --privileged --pid=host ubuntu:latest nsenter -t 1 -m -u -n -i sh -c 'cat /proc/config.gz | gunzip | grep CONFIG_DEBUG_INFO_BTF'
+```
+
+Disable redirects on UPF to avoid duplicate packets
+```bash
+sysctl -a | grep redirects
+
+sysctl -w net.ipv4.conf.all.accept_redirects=0
+sysctl -w net.ipv4.conf.default.accept_redirects=0
+sysctl -w net.ipv4.conf.eth0.accept_redirects=0
+
+sysctl -w net.ipv4.conf.all.send_redirects=0
+sysctl -w net.ipv4.conf.default.send_redirects=0
+sysctl -w net.ipv4.conf.eth0.send_redirects=0
+
+sysctl -w net.ipv4.conf.all.secure_redirects=0
+sysctl -w net.ipv4.conf.default.secure_redirects=0
+sysctl -w net.ipv4.conf.eth0.secure_redirects=0
+```
+
+```bash
+ip link add br-gtp type bridge
+ip netns add uegtp0
+ip netns exec uegtp0 ip link
+ip link add uegtp0_i type veth peer name uegtp0
+ip netns exec uegtp0 ip link
+ip link set uegtp0_i netns uegtp0
+ip netns exec uegtp0 ip link
+ip netns exec uegtp0 ip r
+ip link set br-gtp up
+ip netns add uegtp1
+ip netns exec uegtp1 ip link
+ip link add uegtp1_i type veth peer name uegtp1
+ip netns exec uegtp1 ip link
+ip link set uegtp1_i netns uegtp1
+ip netns exec uegtp1 ip link
+ip netns exec uegtp1 ip r
+ip link set uegtp0 master br-gtp
+ip link set uegtp1 master br-gtp
+ip link set uegtp0 up
+ip link set uegtp1 up
+ip netns exec uegtp0 ip link set dev uegtp0_i up
+ip netns exec uegtp0 ip link
+ip netns exec uegtp0 ip r
+ip netns exec uegtp1 ip link set dev uegtp1_i up
+ip netns exec uegtp1 ip r
+ip netns exec uegtp1 ip link
+ip netns exec uegtp0 ip address add 12.1.1.2/24 dev uegtp0_i
+ip netns exec uegtp0 ip link
+ip netns exec uegtp0 ip a
+ip netns exec uegtp0 ip r
+ip netns exec uegtp1 ip address add 12.1.1.3/24 dev uegtp1_i
+ip netns exec uegtp1 ip r
+ip netns exec uegtp1 ip a
+ping -c 4 -i 0.2 12.1.1.2
+ping -c 4 -i 0.2 12.1.1.3
+ip a add 12.1.1.1/24 brd + dev br-gtp
+ip a | grep br-gtp
+ip r
+ping -c 4 -i 0.2 12.1.1.2
+ip netns exec uegtp1 ip r
+ping -c 4 -i 0.2 12.1.1.3
+ip netns exec uegtp1 ip route add default via 12.1.1.1
+ip netns exec uegtp1 ip r
+ip netns exec uegtp0 ip route add default via 12.1.1.1
+ip netns exec uegtp0 ip r
+ping -c 4 -i 0.2 12.1.1.3
+sysctl -w net.ipv4.ip_forward=1
+ping -c 4 -i 0.2 12.1.1.3
+ping -c 4 -i 0.2 12.1.1.2
+ip netns exec uegtp1 ping -c 4 -i 0.2 12.1.1.2
+ip netns exec uegtp0 ping -c 4 -i 0.2 12.1.1.3
+```
+
+# Enable TCP packets in NAT'ed env
+
+```bash
+ethtool --offload  <iface_name> rx off tx off
+
+# Check for TCP related errors
+netstat -s
 ```
 ## Useful Resources
 
@@ -113,4 +193,7 @@ docker run -it --rm --privileged --pid=host ubuntu:latest nsenter -t 1 -m -u -n 
 - http://arthurchiao.art/blog/differentiate-bpf-redirects/
 - https://patchwork.kernel.org/project/netdevbpf/patch/20210512103451.989420-3-memxor@gmail.com/
 - https://lore.kernel.org/bpf/d5995641-9ce9-9cad-7a58-999614550963@fb.com/
-
+- https://lore.kernel.org/bpf/1567892444-16344-2-git-send-email-alan.maguire@oracle.com/
+- https://github.com/siemens/edgeshark?tab=readme-ov-file#siemens-industrial-edge
+- https://www.dasblinkenlichten.com/working-with-tc-on-linux-systems/
+- https://www.alibabacloud.com/blog/why-are-linux-kernel-protocol-stacks-dropping-syn-packets_595251

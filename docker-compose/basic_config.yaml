@@ -76,7 +76,7 @@ nfs:
       interface_name: eth0
       port: 8805
     n6:
-      interface_name: eth0
+      interface_name: eth1
     n9:
       interface_name: eth0
       port: 2152
@@ -205,7 +205,7 @@ smf:
 upf:
   support_features:
     enable_bpf_datapath: no    # If "on": BPF is used as datapath else simpleswitch is used, DEFAULT= off
-    enable_snat: yes           # If "on": Source natting is done for UE, DEFAULT= off
+    enable_snat: no           # If "on": Source natting is done for UE, DEFAULT= off
   remote_n6_gw: localhost      # Dummy host since simple-switch does not use N6 GW
   upf_info:
     sNssaiUpfInfoList:

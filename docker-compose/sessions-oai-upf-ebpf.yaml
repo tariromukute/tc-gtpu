@@ -13,24 +13,21 @@
         ip4: 12.1.1.2
     outerHeaderRemoval: OUTER_HEADER_GTPU_UDP_IPV4
     farID: 12
+  - pdrID: 1
+    precedence: 0
+    pdi:
+      sourceInterface: Core
+      networkInstance: core.oai.org
+      ueIPAddress:
+        isDestination: true
+        ip4: 12.1.1.2
+    farID: 13
   fars:
   - farID: 12
     applyAction: Forward
     forwardingParameters:
       destinationInterface: Core
       networkInstance: internet.oai.org
-- seid: 1
-  pdrs:
-  - pdrID: 1
-    precedence: 0
-    pdi:
-      sourceInterface: Core
-      networkInstance: internet.oai.org
-      ueIPAddress:
-        isDestination: true
-        ip4: 12.1.1.2
-    farID: 13
-  fars:
   - farID: 13
     applyAction: Forward
     forwardingParameters:

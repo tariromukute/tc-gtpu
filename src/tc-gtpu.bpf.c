@@ -27,6 +27,7 @@
 
 #define SAMPLE_SIZE 1024ul
 #define MAX_CPUS 128
+#define MAX_TCP_SIZE 1448
 
 #define min(x, y) ((x) < (y) ? (x) : (y))
 
@@ -103,8 +104,7 @@ static struct ipv6_gtpu_encap ipv6_gtpu_encap = {
 };
 
 /* Logic for checksum, thanks to https://github.com/facebookincubator/katran/blob/main/katran/lib/bpf/csum_helpers.h */
-__attribute__((__always_inline__))
-static inline __u16 csum_fold_helper(__u64 csum) {
+static __always_inline __u16 csum_fold_helper(__u64 csum) {
     int i;
 #pragma unroll
     for (i = 0; i < 4; i++) {
@@ -114,14 +114,12 @@ static inline __u16 csum_fold_helper(__u64 csum) {
     return ~csum;
 }
 
-__attribute__((__always_inline__))
-static inline void ipv4_csum(void* data_start, int data_size, __u64* csum) {
+static __always_inline void ipv4_csum(void* data_start, int data_size, __u64* csum) {
     *csum = bpf_csum_diff(0, 0, data_start, data_size, *csum);
     *csum = csum_fold_helper(*csum);
 }
 
-__attribute__((__always_inline__))
-static inline void ipv4_csum_inline(
+static __always_inline void ipv4_csum_inline(
     void* iph,
     __u64* csum) {
   __u16* next_iph_u16 = (__u16*)iph;
@@ -130,6 +128,68 @@ static inline void ipv4_csum_inline(
         *csum += *next_iph_u16++;
     }
     *csum = csum_fold_helper(*csum);
+    bpf_printk("Checksumx %llx", *csum);
+}
+
+
+static __always_inline __u16
+csum_fold_helperx(__u64 csum)
+{
+    int i;
+#pragma unroll
+    for (i = 0; i < 4; i++)
+    {
+        if (csum >> 16)
+            csum = (csum & 0xffff) + (csum >> 16);
+    }
+    return ~csum;
+}
+
+static __always_inline __u16
+iph_csum(struct iphdr *iph)
+{
+    iph->check = 0;
+    unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)iph, sizeof(struct iphdr), 0);
+    return csum_fold_helperx(csum);
+}
+
+/* All credit goes to FedeParola from https://github.com/iovisor/bcc/issues/2463 */
+__attribute__((__always_inline__))
+static inline __u16 caltcpcsum(struct iphdr *iph, struct tcphdr *tcph, void *data_end)
+{
+    __u32 csum_buffer = 0;
+    __u16 volatile *buf = (void *)tcph;
+
+    // Compute pseudo-header checksum
+    csum_buffer += (__u16)iph->saddr;
+    csum_buffer += (__u16)(iph->saddr >> 16);
+    csum_buffer += (__u16)iph->daddr;
+    csum_buffer += (__u16)(iph->daddr >> 16);
+    csum_buffer += (__u16)iph->protocol << 8;
+    csum_buffer += bpf_htons(bpf_ntohs(iph->tot_len) - (__u16)(iph->ihl<<2));
+
+    // Compute checksum on tcp header + payload
+    for (int i = 0; i < MAX_TCP_SIZE; i += 2) 
+    {
+        if ((void *)(buf + 1) > data_end) 
+        {
+            break;
+        }
+
+        csum_buffer += *buf;
+        buf++;
+    }
+
+    if ((void *)buf + 1 <= data_end) 
+    {
+        // In case payload is not 2 bytes aligned
+        csum_buffer += *(__u8 *)buf;
+    }
+
+    __u16 csum = (__u16)csum_buffer + (__u16)(csum_buffer >> 16);
+    csum = ~csum;
+
+    return csum;
 }
 
 int handle_perf_pcap(struct __sk_buff *skb) {
@@ -156,8 +216,8 @@ int handle_perf_pcap(struct __sk_buff *skb) {
     return ret;
 }
 
-SEC("tc/ingress")
-int tnl_if_ingress_fn(struct __sk_buff *skb)
+SEC("tc/egress")
+int tnl_if_egress_fn(struct __sk_buff *skb)
 {
     /**
      * The function is attached to the ingress of the tunnel interface associated with a UE.
@@ -185,8 +245,8 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
     }
 };
 
-SEC("tc/egress")
-int tnl_if_egress_fn(struct __sk_buff *skb)
+SEC("tc/ingress")
+int tnl_if_ingress_fn(struct __sk_buff *skb)
 {
     /**
      * This function is attached to the egress of the tunnel interface associated with a UE.
@@ -201,22 +261,26 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
     bpf_printk("Received packet on tnl_if_egress\n");
     void *data_end = (void *)(unsigned long long)skb->data_end;
     void *data = (void *)(unsigned long long)skb->data;
-    int eth_type;
+    int eth_type, ip_type;
     struct hdr_cursor nh = { .pos = data };
     struct ethhdr *eth = data;
+    struct iphdr *iphdr;
+    struct tcphdr *tcphdr;
     __u64 csum = 0;
     __u32 qfi, teid;
     __u32 key = skb->ifindex;
     struct egress_state *state;
 
     int payload_len = (data_end - data) - sizeof(struct ethhdr);
-
-    eth_type = parse_ethhdr(&nh, data_end, &eth);
-	if (eth_type != bpf_htons(ETH_P_IP))
-		goto out;
-
+    
     if (config.verbose_level == LOG_VERBOSE)
         handle_perf_pcap(skb);
+
+    eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type != bpf_htons(ETH_P_IP)) {
+        bpf_printk("No match going out");
+        goto out;
+    }
     
     // Logic to fetch QFI and TEID from maps or use defaults
     state = bpf_map_lookup_elem(&egress_map, &key);
@@ -231,7 +295,7 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
     int roomlen = sizeof(struct ipv4_gtpu_encap);
     int ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, 0);
     if (ret) {
-        bpf_printk("error calling skb adjust room.\n");
+        bpf_printk("error calling skb adjust room %d, error code %d\n", roomlen, ret);
         return TC_ACT_SHOT;
     }
 
@@ -345,7 +409,7 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
         __builtin_memcpy(eth->h_dest, state->if_mac, ETH_ALEN);
     }
 
-    return bpf_redirect(tnl_interface, BPF_F_INGRESS);
+    // return bpf_redirect(tnl_interface, 0);
 
 out:
     return TC_ACT_OK;
@@ -354,7 +418,7 @@ out:
 SEC("tc/egress")
 int gtpu_egress_fn(struct __sk_buff *skb)
 {
-    /**
+     /**
      * The function is attched to the egress of the interface attached to the external
      * network. It receives GTPU encapuslated packets from the tunnel interfaces. This 
      * functions does nothing to the packet data except for other util functions like 
@@ -397,3 +461,36 @@ out:
 };
 
 char __license[] __section("license") = "GPL";
+
+// // Calculate the checksum
+//     __u32 gtpu_len = sizeof(struct gtpuhdr) + sizeof(struct gtpu_hdr_ext) + sizeof(struct gtp_pdu_session_container);
+//     if (nh.pos + gtpu_len > data_end)
+//         goto out;
+
+//     nh.pos += gtpu_len;
+
+//     ip_type = parse_iphdr(&nh, data_end, &iphdr);
+// 	if (ip_type < 0) {
+//         bpf_printk("ip_type < 0");
+// 		goto out;
+//     }
+
+
+//     // // ipv4_csum_inline(iphdr, &csum);
+//     iphdr->check = 0;
+//     iphdr->check = iph_csum(iphdr);
+//     bpf_printk("Checksum %lx", iphdr->check);
+
+//     if (ip_type == IPPROTO_TCP) { // TCP
+        
+//         if (parse_tcphdr(&nh, data_end, &tcphdr) < 0) {
+//              bpf_printk("parse_tcphdr(&nh, data_end, &tcphdr)");
+// 			goto out;
+// 		}
+        
+//         // if ((void *)tcphdr + 1 > data_end)
+//         //     goto out;
+//         tcphdr->check = 0;
+//         // tcphdr->check = caltcpcsum(iphdr, tcphdr, data_end);
+//         // bpf_printk("TCP Checksum %lx", tcphdr->check);
+//     }

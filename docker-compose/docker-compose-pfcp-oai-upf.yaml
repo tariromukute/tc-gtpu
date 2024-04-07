@@ -46,6 +46,8 @@ services:
             - ALL
         privileged: true
         networks:
+            n6_net:
+                ipv4_address: 192.168.72.134
             public_net:
                 ipv4_address: 192.168.70.134
     oai-ext-dn:
@@ -63,6 +65,8 @@ services:
             timeout: 5s
             retries: 5
         networks:
+            n6_net:
+                ipv4_address: 192.168.72.135
             public_net:
                 ipv4_address: 192.168.70.135
 networks:

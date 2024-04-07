@@ -1,0 +1,149 @@
+version: '3.8'
+services:
+    pfcp-kitchen-sink:
+        container_name: "pfcp-kitchen-sink"
+        image: tariromukute/pfcp-kitchen-sink:latest
+        volumes:
+            - ./sessions-oai-upf.yaml:/app/sessions.yaml
+        # command: ./pfcpclient -r 192.168.70.134:8805 -s sessions.yaml
+        command: tail -f /dev/null
+        depends_on:
+            - oai-upf
+        networks:
+            public_net:
+                ipv4_address: 192.168.70.131
+    tc-gtpu-tnl:
+        privileged: true
+        container_name: "tc-gtpu-tnl"
+        image: tariromukute/tc-gtpu:latest
+        command: tail -f /dev/null
+        volumes:
+            - /sys/kernel/debug/:/sys/kernel/debug/
+            - /sys/fs/bpf:/sys/fs/bpf 
+            - /home/ubuntu/tc-gtpu-tnl:/home
+        devices:
+            - /dev/net/tun:/dev/net/tun
+        # cap_add:
+        #     - NET_ADMIN
+        #     - SYS_ADMIN
+        # cap_drop:
+        #     - ALL
+        depends_on:
+            - oai-upf
+            - pfcp-kitchen-sink
+        networks:
+            public_net:
+                ipv4_address: 192.168.70.130
+    oai-upf:
+        container_name: "oai-upf"
+        image: tariromukute/oai-upf-dev:latest
+        command: tail -f /dev/null
+        volumes:
+            - ./basic_config.yaml:/openair-upf/etc/config.yaml
+            - /home/ubuntu/oai-cn5g-upf:/home
+        environment:
+            - TZ=Europe/Paris
+            - N6_MAC=02:42:ac:11:65:43
+            - LAN_MAC=02:42:ac:11:65:44
+        cap_add:
+            - NET_ADMIN
+            - SYS_ADMIN
+        cap_drop:
+            - ALL
+        privileged: true
+        networks:
+            public_net:
+                ipv4_address: 192.168.70.134
+            n6_net:
+                ipv4_address: 192.168.72.134
+                mac_address: 02:42:ac:11:65:43
+    oai-ext-dn:
+        privileged: true
+        init: true
+        container_name: "oai-ext-dn"
+        image: tariromukute/trf-gen-cn5g:latest
+        entrypoint: /bin/bash -c \
+              "ip link set dev eth0 xdpgeneric obj /tmp/nsh-decap.bpf.o sec xdp_nsh_decap;"\
+              "iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE;"\
+              "ip route add 12.1.1.0/24 via 192.168.72.134 dev eth0; ip route; sleep infinity"
+        command: ["/bin/bash", "-c", "trap : SIGTERM SIGINT; sleep infinity & wait"]
+        volumes:
+            - /home/ubuntu/trf-gen-cn5g:/home
+        healthcheck:
+            test: /bin/bash -c "iptables -L -t nat | grep MASQUERADE"
+            interval: 10s
+            timeout: 5s
+            retries: 5
+        networks:
+            public_net:
+                ipv4_address: 192.168.70.135
+            n6_net:
+                ipv4_address: 192.168.72.135
+                mac_address: 02:42:ac:11:65:44
+            # data_net:
+            #     ipv4_address: 192.168.73.135
+            #     mac_address: 02:42:ac:11:65:45
+
+    iperf:
+        container_name: "iperf"
+        image: cagedata/iperf3:latest
+        networks:
+            n6_net:
+                ipv4_address: 192.168.72.136
+
+    iperf3:
+        privileged: true
+        container_name: "iperf3"
+        image: ubuntu:jammy
+        command: tail -f /dev/null
+        cap_add:
+            - NET_ADMIN
+        networks:
+            n6_net:
+                ipv4_address: 192.168.72.137
+
+    dropwatch:
+        privileged: true
+        container_name: "dropwatch"
+        image: ubuntu:jammy
+        command: tail -f /dev/null
+        volumes:
+        - /usr/src:/usr/src:ro 
+        - /lib/modules/:/lib/modules:ro 
+        - /sys/:/sys/:rw 
+        pid: 'host'
+        network_mode: host
+
+networks:
+    public_net:
+        driver: bridge
+        name: demo-oai-public-net
+        ipam:
+            config:
+                - subnet: 192.168.70.128/26
+        driver_opts:
+            com.docker.network.bridge.name: "demo-oai"
+    n3_net:
+        driver: bridge
+        name: demo-oai-n3-net
+        ipam:
+            config:
+                - subnet: 192.168.71.128/26
+        driver_opts:
+            com.docker.network.bridge.name: "demo-n3"
+    n6_net:
+        driver: bridge
+        name: demo-oai-n6-net
+        ipam:
+            config:
+                - subnet: 192.168.72.128/26
+        driver_opts:
+            com.docker.network.bridge.name: "demo-n6"
+    data_net:
+        driver: bridge
+        name: demo-oai-data-net
+        ipam:
+            config:
+                - subnet: 192.168.73.128/26
+        driver_opts:
+            com.docker.network.bridge.name: "demo-dn"
