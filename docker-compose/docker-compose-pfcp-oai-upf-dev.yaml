@@ -5,22 +5,24 @@ services:
         image: tariromukute/pfcp-kitchen-sink:latest
         volumes:
             - ./sessions-oai-upf.yaml:/app/sessions.yaml
-        # command: ./pfcpclient -r 192.168.70.134:8805 -s sessions.yaml
-        command: tail -f /dev/null
+        command: ./pfcpclient -r 192.168.70.134:8805 -s sessions.yaml
+        # command: tail -f /dev/null
         depends_on:
-            - oai-upf
+            # - oai-upf
+            - edgecomllc-eupf
         networks:
             public_net:
                 ipv4_address: 192.168.70.131
     tc-gtpu-tnl:
         privileged: true
+        # platform: linux/amd64
         container_name: "tc-gtpu-tnl"
-        image: tariromukute/tc-gtpu:latest
+        image: tariromukute/tc-gtpu-tnl:latest
         command: tail -f /dev/null
         volumes:
             - /sys/kernel/debug/:/sys/kernel/debug/
-            - /sys/fs/bpf:/sys/fs/bpf 
-            - /home/ubuntu/tc-gtpu-tnl:/home
+            - /sys/fs/bpf:/sys/fs/bpf
+            - /Users/tariromukute/Documents/phd/tc-gtpu:/home
         devices:
             - /dev/net/tun:/dev/net/tun
         # cap_add:
@@ -29,34 +31,76 @@ services:
         # cap_drop:
         #     - ALL
         depends_on:
-            - oai-upf
+            # - oai-upf
+            - edgecomllc-eupf
             - pfcp-kitchen-sink
         networks:
+            n6_net:
+                ipv4_address: 192.168.72.130
             public_net:
                 ipv4_address: 192.168.70.130
-    oai-upf:
-        container_name: "oai-upf"
-        image: tariromukute/oai-upf-dev:latest
-        command: tail -f /dev/null
-        volumes:
-            - ./basic_config.yaml:/openair-upf/etc/config.yaml
-            - /home/ubuntu/oai-cn5g-upf:/home
+    # oai-upf:
+    #     container_name: "oai-upf"
+    #     image: tariromukute/oai-upf-dev:latest
+    #     command: tail -f /dev/null
+    #     volumes:
+    #         - ./basic_config.yaml:/openair-upf/etc/config.yaml
+    #         - /home/ubuntu/oai-cn5g-upf:/home
+    #     environment:
+    #         - TZ=Europe/Paris
+    #         - N6_MAC=02:42:ac:11:65:43
+    #         - LAN_MAC=02:42:ac:11:65:44
+    #     cap_add:
+    #         - NET_ADMIN
+    #         - SYS_ADMIN
+    #     cap_drop:
+    #         - ALL
+    #     privileged: true
+    #     networks:
+    #         public_net:
+    #             ipv4_address: 192.168.70.134
+    #         n6_net:
+    #             ipv4_address: 192.168.72.134
+    #             mac_address: 02:42:ac:11:65:43
+    edgecomllc-eupf:
+        platform: linux/amd64
+        container_name: "edgecomllc-eupf"
+        image: ghcr.io/edgecomllc/eupf:main
+        entrypoint:
+        - /bin/sh
+        - -c
+        - |
+            ip route del default;
+            ip route add default via 192.168.72.135 dev eth0 &&
+            sh /app/bin/entrypoint.sh
         environment:
-            - TZ=Europe/Paris
-            - N6_MAC=02:42:ac:11:65:43
-            - LAN_MAC=02:42:ac:11:65:44
+            - UPF_INTERFACE_NAME=eth1,eth0
+            - UPF_XDP_ATTACH_MODE=generic
+            - UPF_API_ADDRESS=:8080
+            - UPF_PFCP_ADDRESS=:8805
+            - UPF_METRICS_ADDRESS=:9091
+            - UPF_PFCP_NODE_ID=192.168.70.134
+            - UPF_N3_ADDRESS=192.168.70.134
+            - UPF_UEIP_POOL=12.1.1.0/24
+            - UPF_LOGGING_LEVEL=debug
         cap_add:
             - NET_ADMIN
             - SYS_ADMIN
-        cap_drop:
-            - ALL
+            - SYS_RESOURCE # setrlimit
+        # cap_drop:
+        #     - ALL
+        ports:
+            - "127.0.0.1:8081:8081"
+            - "127.0.0.1:8880:8080"
+            - "127.0.0.1:9090:9090"
+        sysctls:
+            - net.ipv4.conf.all.forwarding=1
         privileged: true
         networks:
             public_net:
                 ipv4_address: 192.168.70.134
             n6_net:
                 ipv4_address: 192.168.72.134
-                mac_address: 02:42:ac:11:65:43
     oai-ext-dn:
         privileged: true
         init: true
@@ -67,8 +111,6 @@ services:
               "iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE;"\
               "ip route add 12.1.1.0/24 via 192.168.72.134 dev eth0; ip route; sleep infinity"
         command: ["/bin/bash", "-c", "trap : SIGTERM SIGINT; sleep infinity & wait"]
-        volumes:
-            - /home/ubuntu/trf-gen-cn5g:/home
         healthcheck:
             test: /bin/bash -c "iptables -L -t nat | grep MASQUERADE"
             interval: 10s
@@ -84,15 +126,9 @@ services:
             #     ipv4_address: 192.168.73.135
             #     mac_address: 02:42:ac:11:65:45
 
-    iperf:
-        container_name: "iperf"
-        image: cagedata/iperf3:latest
-        networks:
-            n6_net:
-                ipv4_address: 192.168.72.136
-
     iperf3:
         privileged: true
+        platform: linux/amd64
         container_name: "iperf3"
         image: ubuntu:jammy
         command: tail -f /dev/null
@@ -104,6 +140,7 @@ services:
 
     dropwatch:
         privileged: true
+        platform: linux/amd64
         container_name: "dropwatch"
         image: ubuntu:jammy
         command: tail -f /dev/null

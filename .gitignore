@@ -7,5 +7,6 @@
 *.ll
 
 *.pcap
+*.pcapng
 
 *.log

@@ -104,14 +104,12 @@ static struct ipv6_gtpu_encap ipv6_gtpu_encap = {
 };
 
 /* Logic for checksum, thanks to https://github.com/facebookincubator/katran/blob/main/katran/lib/bpf/csum_helpers.h */
-static __always_inline __u16 csum_fold_helper(__u64 csum) {
-    int i;
-#pragma unroll
-    for (i = 0; i < 4; i++) {
-        if (csum >> 16)
-            csum = (csum & 0xffff) + (csum >> 16);
-    }
-    return ~csum;
+static __always_inline __u16 csum_fold_helper(__u32 csum)
+{
+	__u32 sum;
+	sum = (csum >> 16) + (csum & 0xffff);
+	sum += (sum >> 16);
+	return ~sum;
 }
 
 static __always_inline void ipv4_csum(void* data_start, int data_size, __u64* csum) {
@@ -270,6 +268,7 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
     __u32 qfi, teid;
     __u32 key = skb->ifindex;
     struct egress_state *state;
+    __u64 flags;
 
     int payload_len = (data_end - data) - sizeof(struct ethhdr);
     
@@ -281,7 +280,21 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
         bpf_printk("No match going out");
         goto out;
     }
-    
+
+    ip_type = parse_iphdr(&nh, data_end, &iphdr);
+	if (ip_type < 0)
+		goto out;
+
+    // check if skb is non-linear, it if is and pull in non-linear data
+    if (bpf_ntohs(iphdr->tot_len) > payload_len)
+        if (bpf_skb_pull_data(skb, bpf_ntohs(iphdr->tot_len) + sizeof(struct ethhdr)) < 0)
+            return TC_ACT_UNSPEC;
+
+    data_end = (void *)(unsigned long long)skb->data_end;
+    data = (void *)(unsigned long long)skb->data;
+    nh.pos = data;
+    payload_len = (data_end - data) - sizeof(struct ethhdr);
+
     // Logic to fetch QFI and TEID from maps or use defaults
     state = bpf_map_lookup_elem(&egress_map, &key);
     if (state && state->teid && state->qfi) {
@@ -291,9 +304,13 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
         qfi = DEFAULT_QFI;
         teid = skb->ifindex;  // Use interface index as default TEID
     }
-        
+           
+    flags = // BPF_F_ADJ_ROOM_FIXED_GSO |
+          BPF_F_ADJ_ROOM_ENCAP_L3_IPV4 |
+          BPF_F_ADJ_ROOM_ENCAP_L4_UDP;
+
     int roomlen = sizeof(struct ipv4_gtpu_encap);
-    int ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, 0);
+    int ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, flags);
     if (ret) {
         bpf_printk("error calling skb adjust room %d, error code %d\n", roomlen, ret);
         return TC_ACT_SHOT;
@@ -307,6 +324,10 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
     ipv4_gtpu_encap.ipv4h.daddr = config.daddr.addr.addr4.s_addr;
     ipv4_gtpu_encap.ipv4h.saddr = config.saddr.addr.addr4.s_addr;
     ipv4_gtpu_encap.ipv4h.tot_len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len);
+
+    // For checksum to be recalculated
+    bpf_set_hash_invalid(skb);
+    // ipv4_gtpu_encap.ipv4h.check = csum_fold_helper(bpf_csum_diff((__be32 *)&ipv4_gtpu_encap.ipv4h, 0, (__be32 *)&ipv4_gtpu_encap.ipv4h, sizeof(struct iphdr), 0));
     
     ipv4_gtpu_encap.udp.len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len - sizeof(struct iphdr));
 

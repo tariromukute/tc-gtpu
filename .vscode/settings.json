@@ -7,6 +7,7 @@
         "unistd.h": "c",
         "signal.h": "c",
         "gtpu.h": "c",
-        "tc-gtpu.skel.h": "c"
+        "tc-gtpu.skel.h": "c",
+        "ios": "c"
     }
 }

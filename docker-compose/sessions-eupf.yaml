@@ -4,7 +4,7 @@
     precedence: 0
     pdi:
       sourceInterface: Access
-      networkInstance: access.oai.org
+      # networkInstance: access.oai.org
       localFTEID:
         teid: 1234
         ip4: 192.168.70.134
@@ -18,14 +18,14 @@
     applyAction: Forward
     forwardingParameters:
       destinationInterface: Core
-      networkInstance: internet.oai.org.pri
+      # networkInstance: internet.oai.org.pri
 - seid: 1
   pdrs:
   - pdrID: 1
     precedence: 0
     pdi:
       sourceInterface: Core
-      networkInstance: internet.oai.org.pri
+      # networkInstance: internet.oai.org.pri
       ueIPAddress:
         isDestination: true
         ip4: 12.1.1.2
@@ -35,7 +35,7 @@
     applyAction: Forward
     forwardingParameters:
       destinationInterface: Access
-      networkInstance: access.oai.org
+      # networkInstance: access.oai.org
       outerHeaderCreation:
         desc: OUTER_HEADER_CREATION_GTPU_UDP_IPV4
         teid: 1234

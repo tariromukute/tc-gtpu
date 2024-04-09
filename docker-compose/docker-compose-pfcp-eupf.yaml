@@ -13,6 +13,7 @@ services:
                 ipv4_address: 192.168.70.131
     tc-gtpu-tnl:
         privileged: true
+        platform: linux/amd64
         container_name: "tc-gtpu-tnl"
         image: tariromukute/tc-gtpu:latest
         command: tail -f /dev/null
@@ -32,16 +33,26 @@ services:
             public_net:
                 ipv4_address: 192.168.70.130
     edgecomllc-eupf:
+        platform: linux/amd64
         container_name: "edgecomllc-eupf"
         image: ghcr.io/edgecomllc/eupf:main
+        entrypoint:
+        - /bin/sh
+        - -c
+        - |
+            ip route del default;
+            ip route add default via 192.168.72.135 dev eth0 &&
+            sh /app/bin/entrypoint.sh
         environment:
             - UPF_INTERFACE_NAME=eth1,eth0
             - UPF_XDP_ATTACH_MODE=generic
-            - UPF_API_ADDRESS=:8081
+            - UPF_API_ADDRESS=:8080
             - UPF_PFCP_ADDRESS=:8805
             - UPF_METRICS_ADDRESS=:9091
             - UPF_PFCP_NODE_ID=192.168.70.134
             - UPF_N3_ADDRESS=192.168.70.134
+            - UPF_UEIP_POOL=12.1.1.0/24
+            - UPF_LOGGING_LEVEL=debug
         cap_add:
             - NET_ADMIN
             - SYS_ADMIN
@@ -49,8 +60,9 @@ services:
         # cap_drop:
         #     - ALL
         ports:
-            - "8880:8080"
-            - "9090:9090"
+            - "127.0.0.1:8081:8081"
+            - "127.0.0.1:8880:8080"
+            - "127.0.0.1:9090:9090"
         sysctls:
             - net.ipv4.conf.all.forwarding=1
         privileged: true
@@ -61,13 +73,14 @@ services:
                 ipv4_address: 192.168.72.134
     oai-ext-dn:
         privileged: true
+        platform: linux/amd64
         init: true
         container_name: oai-ext-dn
         image: oaisoftwarealliance/trf-gen-cn5g:latest
-        environment:
-            - UPF_FQDN=edgecomllc-eupf
-            - UE_NETWORK=12.1.1.0/24
-            - USE_FQDN=yes
+        entrypoint: /bin/bash -c \
+              "iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE;"\
+              "ip route add 12.1.1.0/24 via 192.168.72.134 dev eth0; ip route; sleep infinity"
+        command: ["/bin/bash", "-c", "trap : SIGTERM SIGINT; sleep infinity & wait"]
         healthcheck:
             test: /bin/bash -c "ip r | grep 12.1.1"
             interval: 10s

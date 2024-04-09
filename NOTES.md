@@ -28,6 +28,10 @@ cat /sys/kernel/debug/tracing/trace_pipe
 
 Build with Dockerfile
 
+```bash
+docker buildx build --platform=linux/amd64 -t tariromukute/tc-gtpu:latest -f Dockerfile .
+```
+
 Either:
 1. create container and the mount the debugfs inside the container.
 
@@ -185,6 +189,13 @@ ethtool --offload  <iface_name> rx off tx off
 # Check for TCP related errors
 netstat -s
 ```
+
+```bash
+sysctl net.ipv4.tcp_timestamps
+
+sysctl -w net.ipv4.tcp_timestamps=0
+
+```
 ## Useful Resources
 
 - [Understanding tc “direct action” mode for BPF](https://qmonnet.github.io/whirl-offload/2020/04/11/tc-bpf-direct-action/)
@@ -197,3 +208,5 @@ netstat -s
 - https://github.com/siemens/edgeshark?tab=readme-ov-file#siemens-industrial-edge
 - https://www.dasblinkenlichten.com/working-with-tc-on-linux-systems/
 - https://www.alibabacloud.com/blog/why-are-linux-kernel-protocol-stacks-dropping-syn-packets_595251
+- https://arstechnica.com/civis/threads/a-possibly-simple-sniffer-trace-question-psh-ack.343792/
+- https://blogs.oracle.com/linux/post/notes-on-bpf-7-bpf-tc-and-generic-segmentation-offload
