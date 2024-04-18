@@ -129,7 +129,7 @@ static const struct option long_options[] = {
 	{"dl-teid",    required_argument,    NULL, 'l' },
 	{"qfi", required_argument,    NULL, 'q' },
 	{"num-ues", optional_argument,    NULL, 'n' },
-	{"pcap-file", optional_argument,    NULL, '-f' },
+	{"pcap-file", optional_argument,    NULL, 'f' },
 	{"verbose", optional_argument,    NULL, 'v' },
 	/* HINT assign: optional_arguments with '=' */
 	{0, 0, NULL,  0 }
@@ -271,11 +271,6 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 }
 
-static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
-{
-	return vfprintf(stderr, format, args);
-}
-
 static int set_if_mac(const char *ifname, __u8 m_addr[ETH_ALEN]) {
 	struct ifreq s;
     int fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
@@ -287,75 +282,6 @@ static int set_if_mac(const char *ifname, __u8 m_addr[ETH_ALEN]) {
     }
 
     return -1;
-}
-static int create_dummy_interface(const char* ifname, const char* ip_address) {
-	char cmd[CMD_MAX];
-	int ret = 0;
-
-	// Step 1: Create dummy interface */
-	memset(&cmd, 0, CMD_MAX);
-	snprintf(cmd, CMD_MAX,
-		 "ip link add %s type dummy 2> /dev/null",
-		 ifname);
-	pr_debug(" - Run: %s\n", cmd);
-	ret = system(cmd);
-	if (!WIFEXITED(ret)) {
-		pr_debug(
-			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
-			WEXITSTATUS(ret), cmd);
-		exit(EXIT_FAILURE);
-	}
-
-	// Step 2: Assign ip address */
-	memset(&cmd, 0, CMD_MAX);
-	snprintf(cmd, CMD_MAX,
-		 "ip addr add %s/24 dev %s 2> /dev/null",
-		 ip_address, ifname);
-	pr_debug(" - Run: %s\n", cmd);
-	ret = system(cmd);
-	if (!WIFEXITED(ret)) {
-		pr_debug(
-			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
-			WEXITSTATUS(ret), cmd);
-		exit(EXIT_FAILURE);
-	}
-
-	// Step 3: Set interface up
-	memset(&cmd, 0, CMD_MAX);
-	snprintf(cmd, CMD_MAX,
-		 "ip link set %s up 2> /dev/null",
-		 ifname);
-	pr_debug(" - Run: %s\n", cmd);
-	ret = system(cmd);
-	if (!WIFEXITED(ret)) {
-		pr_debug(
-			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
-			WEXITSTATUS(ret), cmd);
-		exit(EXIT_FAILURE);
-	}
-
-	return ret;
-}
-
-static int delete_dummy_interface(const char* ifname) {
-	char cmd[CMD_MAX];
-	int ret = 0;
-
-	// Step 1: Create dummy interface */
-	memset(&cmd, 0, CMD_MAX);
-	snprintf(cmd, CMD_MAX,
-		 "ip link delete %s 2> /dev/null",
-		 ifname);
-	pr_debug(" - Run: %s\n", cmd);
-	ret = system(cmd);
-	if (!WIFEXITED(ret)) {
-		pr_debug(
-			"ERR(%d): Cannot exec ip cmd\n Cmdline:%s\n",
-			WEXITSTATUS(ret), cmd);
-		exit(EXIT_FAILURE);
-	}
-
-	return ret;
 }
 
 static int create_ns_bridge(const char* name, const char* address) {
@@ -413,7 +339,6 @@ static int create_ue_ns(const char* br_postfix, const char* bridge_address, cons
 	const char* name = ifname;
 
 	// Step 1: Create namespance */
-	printf("======= Name is %s", name);
 	memset(&cmd, 0, CMD_MAX);
 	snprintf(cmd, CMD_MAX,
 		 "ip netns add %s 2> /dev/null",
@@ -656,7 +581,6 @@ static int create_ue_interface(char *br_postfix, char *bridge_address, char *ifn
                                  struct tc_gtpu_bpf *skel) {
     int err = 0;
 
-    // create_dummy_interface(ifname, ue_address);
 	create_ue_ns(br_postfix, bridge_address, ifname, ue_address);
 	int ifindex = if_nametoindex(ifname);
 	if (ifindex == 0) {
@@ -783,7 +707,8 @@ static void tc_gtpu(struct config *cfg) {
     struct tc_gtpu_bpf *skel;
     int err;
 
-    libbpf_set_print(libbpf_print_fn);
+	set_log_level(verbose_level);
+	init_lib_logging();
 
     skel = tc_gtpu_bpf__open();
     if (!skel) {
@@ -859,7 +784,7 @@ static void tc_gtpu(struct config *cfg) {
 
     printf("Successfully started! To test: \n" 
 		"\t 1. RUN: `cat /sys/kernel/debug/tracing/trace_pipe` to see output of the BPF program.\n"
-		"\t 2. RUN: `ping -I %s0 8.8.8.8 -c 5` to send packet via the gtpu tunnel\n", cfg->tnl_ifname);
+		"\t 2. RUN: `ip netns exec %s0 ping -c 4 8.8.8.8` to send packet via the gtpu tunnel\n", cfg->tnl_ifname);
 
 	while (true) {
 		if (verbose_level == LOG_VERBOSE && ((err = perf_buffer__poll(pb, 1000)) < 0 && exiting))
@@ -871,7 +796,6 @@ static void tc_gtpu(struct config *cfg) {
 	for (int i = 0; i < num_ues; ++i) {
         char ifname[IF_NAMESIZE];
         snprintf(ifname, sizeof(ifname), "%s%d", cfg->tnl_ifname, i);
-        // delete_dummy_interface(ifname);
 		delete_ue_ns(ifname);
     }
 

@@ -17,7 +17,7 @@ services:
         privileged: true
         # platform: linux/amd64
         container_name: "tc-gtpu-tnl"
-        image: tariromukute/tc-gtpu-tnl:latest
+        image: tariromukute/tc-gtpu:latest
         command: tail -f /dev/null
         volumes:
             - /sys/kernel/debug/:/sys/kernel/debug/
@@ -71,7 +71,7 @@ services:
         - -c
         - |
             ip route del default;
-            ip route add default via 192.168.72.135 dev eth0 &&
+            ip route add default via 192.168.72.138 dev eth0 &&
             sh /app/bin/entrypoint.sh
         environment:
             - UPF_INTERFACE_NAME=eth1,eth0
@@ -101,55 +101,96 @@ services:
                 ipv4_address: 192.168.70.134
             n6_net:
                 ipv4_address: 192.168.72.134
-    oai-ext-dn:
+    n6-lan:
+        platform: linux/amd64
         privileged: true
         init: true
-        container_name: "oai-ext-dn"
-        image: tariromukute/trf-gen-cn5g:latest
-        entrypoint: /bin/bash -c \
-              "ip link set dev eth0 xdpgeneric obj /tmp/nsh-decap.bpf.o sec xdp_nsh_decap;"\
-              "iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE;"\
-              "ip route add 12.1.1.0/24 via 192.168.72.134 dev eth0; ip route; sleep infinity"
-        command: ["/bin/bash", "-c", "trap : SIGTERM SIGINT; sleep infinity & wait"]
-        healthcheck:
-            test: /bin/bash -c "iptables -L -t nat | grep MASQUERADE"
-            interval: 10s
-            timeout: 5s
-            retries: 5
+        container_name: "n6-lan"
+        image: tariromukute/n6-lan-simple:latest
+        command: 
+        - /bin/bash
+        - -c
+        - |
+            sh testovs.sh
+            ovs-vsctl add-port brovs1 eth1
+            ip addr flush dev eth1 && ip addr add 192.168.72.138/26 dev brovs1 && ip link set brovs1 up
+            iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+            ip route add 12.1.1.0/24 via 192.168.72.134 dev brovs1
+            tail -f /dev/null
+        # command:  tail -f /dev/null
+        # command: ["/bin/bash", "-c", "trap : SIGTERM SIGINT; sleep infinity & wait"]
+        # apt-get install kmod
+        # network_mode: host
+        # pid: 'host'
+        # ovs-vsctl add-br brovs1
+        # ip route add default via 192.168.72.129 dev brovs1
+        devices:
+            - /dev/net/tun:/dev/net/tun # https://docs.openvswitch.org/en/stable/intro/install/userspace/#building-and-installing
+        volumes:
+            - /lib/modules:/lib/modules
         networks:
-            public_net:
-                ipv4_address: 192.168.70.135
+            # public_net:
+            #     ipv4_address: 192.168.70.138
             n6_net:
-                ipv4_address: 192.168.72.135
-                mac_address: 02:42:ac:11:65:44
-            # data_net:
-            #     ipv4_address: 192.168.73.135
-            #     mac_address: 02:42:ac:11:65:45
+                ipv4_address: 192.168.72.138
+            data_net:
+                ipv4_address: 192.168.73.138
+    # oai-ext-dn:
+    #     privileged: true
+    #     init: true
+    #     container_name: "oai-ext-dn"
+    #     image: tariromukute/trf-gen-cn5g:latest
+    #     entrypoint: /bin/bash -c \
+    #           "ip link set dev eth0 xdpgeneric obj /tmp/nsh-decap.bpf.o sec xdp_nsh_decap;"\
+    #           "iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE;"\
+    #           "ip route add 12.1.1.0/24 via 192.168.72.134 dev eth0; ip route; sleep infinity"
+    #     command: ["/bin/bash", "-c", "trap : SIGTERM SIGINT; sleep infinity & wait"]
+    #     healthcheck:
+    #         test: /bin/bash -c "iptables -L -t nat | grep MASQUERADE"
+    #         interval: 10s
+    #         timeout: 5s
+    #         retries: 5
+    #     networks:
+    #         public_net:
+    #             ipv4_address: 192.168.70.135
+    #         n6_net:
+    #             ipv4_address: 192.168.72.135
+    #             mac_address: 02:42:ac:11:65:44
+    #         # data_net:
+    #         #     ipv4_address: 192.168.73.135
+    #         #     mac_address: 02:42:ac:11:65:45
 
     iperf3:
         privileged: true
         platform: linux/amd64
         container_name: "iperf3"
         image: ubuntu:jammy
-        command: tail -f /dev/null
+        # command: tail -f /dev/null
+        command: 
+        - /bin/bash
+        - -c
+        - |
+            apt update -y
+            apt install iperf3 -y
+            iperf3 -s
         cap_add:
             - NET_ADMIN
         networks:
-            n6_net:
-                ipv4_address: 192.168.72.137
+            data_net:
+                ipv4_address: 192.168.73.137
 
-    dropwatch:
-        privileged: true
-        platform: linux/amd64
-        container_name: "dropwatch"
-        image: ubuntu:jammy
-        command: tail -f /dev/null
-        volumes:
-        - /usr/src:/usr/src:ro 
-        - /lib/modules/:/lib/modules:ro 
-        - /sys/:/sys/:rw 
-        pid: 'host'
-        network_mode: host
+    # dropwatch:
+    #     privileged: true
+    #     platform: linux/amd64
+    #     container_name: "dropwatch"
+    #     image: ubuntu:jammy
+    #     command: tail -f /dev/null
+    #     volumes:
+    #     - /usr/src:/usr/src:ro 
+    #     - /lib/modules/:/lib/modules:ro 
+    #     - /sys/:/sys/:rw 
+    #     pid: 'host'
+    #     network_mode: host
 
 networks:
     public_net:

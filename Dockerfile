@@ -21,6 +21,7 @@ FROM $BASE_IMAGE AS runtime
 
 RUN apt-get update && \
     apt-get install -y iproute2 iputils-ping tcpdump \
+    iperf3 \
     libelf1 libelf-dev zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 
@@ -35,6 +36,6 @@ RUN apt-get autoremove -y && \
 WORKDIR /app
 
 COPY --from=builder /app/src /app/
-COPY ./entrypoint.sh /app/bin/entrypoint.sh
+COPY ./entrypoint.sh /app/entrypoint.sh
 
-# ENTRYPOINT ./entrypoint.sh
+ENTRYPOINT [ "sh", "/app/entrypoint.sh" ]

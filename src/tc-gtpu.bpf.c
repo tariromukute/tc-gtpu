@@ -126,7 +126,6 @@ static __always_inline void ipv4_csum_inline(
         *csum += *next_iph_u16++;
     }
     *csum = csum_fold_helper(*csum);
-    bpf_printk("Checksumx %llx", *csum);
 }
 
 
@@ -223,15 +222,13 @@ int tnl_if_egress_fn(struct __sk_buff *skb)
      * the GTPU packets (gtpu ingress). This functions does nothing to the data except for other
      * util functions like recording the number of received packets etc. It returns TC_ACT_OK
     */
-    bpf_printk("Received packet on tnl_if_ingress\n");
+    // bpf_printk("Received packet on tnl_if_ingress\n");
 	void *data_end = (void *)(unsigned long long)skb->data_end;
 	void *data = (void *)(unsigned long long)skb->data;
 	struct ethhdr *eth = data;
 
-	if (data + sizeof(struct ethhdr) > data_end) {
-        bpf_printk("Invalid eth header");
+	if (data + sizeof(struct ethhdr) > data_end)
 		return TC_ACT_SHOT;
-    }
 
     if (config.verbose_level == LOG_VERBOSE)
         handle_perf_pcap(skb);
@@ -256,7 +253,7 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
      * interface (the global const volatile variable gtpu_interface). It sets the destination
      * ip to the gtpu_dest_ip (global const volatile variable gtpu_dest_ip).
     */
-    bpf_printk("Received packet on tnl_if_egress\n");
+    // bpf_printk("Received packet on tnl_if_egress\n");
     void *data_end = (void *)(unsigned long long)skb->data_end;
     void *data = (void *)(unsigned long long)skb->data;
     int eth_type, ip_type;
@@ -276,10 +273,8 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
         handle_perf_pcap(skb);
 
     eth_type = parse_ethhdr(&nh, data_end, &eth);
-	if (eth_type != bpf_htons(ETH_P_IP)) {
-        bpf_printk("No match going out");
+	if (eth_type != bpf_htons(ETH_P_IP))
         goto out;
-    }
 
     ip_type = parse_iphdr(&nh, data_end, &iphdr);
 	if (ip_type < 0)
@@ -341,7 +336,7 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
         return TC_ACT_SHOT;
     }
     
-    bpf_printk("Redirecting to gtpu interface\n");
+    // bpf_printk("Redirecting to gtpu interface\n");
     return bpf_redirect_neigh(config.gtpu_ifindex, NULL, 0, 0);
 
 out:
@@ -360,7 +355,7 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
      * send to based on the tied of the incoming GTPU packet. If the tied_map does not contain
      * a valid value, it will treat the tied as the interface index to send to.
     */
-    bpf_printk("Received packet on gtpu_ingress\n");
+    // bpf_printk("Received packet on gtpu_ingress\n");
 	void *data_end = (void *)(unsigned long long)skb->data_end;
 	void *data = (void *)(unsigned long long)skb->data;
     int eth_type, ip_type, err;
@@ -430,8 +425,6 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
         __builtin_memcpy(eth->h_dest, state->if_mac, ETH_ALEN);
     }
 
-    // return bpf_redirect(tnl_interface, 0);
-
 out:
     return TC_ACT_OK;
 };
@@ -445,7 +438,7 @@ int gtpu_egress_fn(struct __sk_buff *skb)
      * functions does nothing to the packet data except for other util functions like 
      * recording the number of received packets etc. It the sends the packet out.
     */
-    bpf_printk("Received packet on gtpu_egress\n");
+    // bpf_printk("Received packet on gtpu_egress\n");
 	void *data_end = (void *)(unsigned long long)skb->data_end;
 	void *data = (void *)(unsigned long long)skb->data;
     int eth_type, ip_type, err;

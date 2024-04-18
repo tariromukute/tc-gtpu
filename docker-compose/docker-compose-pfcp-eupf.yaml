@@ -9,29 +9,36 @@ services:
         depends_on:
             - edgecomllc-eupf
         networks:
-            public_net:
+            n4_net:
                 ipv4_address: 192.168.70.131
-    tc-gtpu-tnl:
-        privileged: true
-        platform: linux/amd64
-        container_name: "tc-gtpu-tnl"
+    ue-sim:
+        privileged: true # So it can create UE namespaces
+        container_name: "ue-sim"
         image: tariromukute/tc-gtpu:latest
-        command: tail -f /dev/null
+        command:
+        - /bin/bash
+        - -c
+        - |
+            ./tc-gtpu -g eth0 -i uegtp -s 192.168.71.130 -d 192.168.71.134 \
+            -u 12.1.1.2 -b 12.1.1.1 --ul-teid 1234 --dl-teid 1234 --qfi 9 \
+            -n 2 -f /home/tu-gtpu.pcap -vvv
+        healthcheck:
+            test: ip netns exec uegtp0 ping -c 4 192.168.73.129 || exit 1
+            interval: 10s
+            timeout: 5s
+            retries: 5
         volumes:
             - /sys/kernel/debug/:/sys/kernel/debug/
+            - /sys/fs/bpf:/sys/fs/bpf
         devices:
             - /dev/net/tun:/dev/net/tun
-        cap_add:
-            - NET_ADMIN
-            - SYS_ADMIN
-        # cap_drop:
-        #     - ALL
         depends_on:
             - edgecomllc-eupf
             - pfcp-kitchen-sink
         networks:
-            public_net:
-                ipv4_address: 192.168.70.130
+            n3_net:
+                ipv4_address: 192.168.71.130
+
     edgecomllc-eupf:
         platform: linux/amd64
         container_name: "edgecomllc-eupf"
@@ -41,24 +48,24 @@ services:
         - -c
         - |
             ip route del default;
-            ip route add default via 192.168.72.135 dev eth0 &&
+            ip route add default via 192.168.72.138 dev eth2 &&
             sh /app/bin/entrypoint.sh
         environment:
-            - UPF_INTERFACE_NAME=eth1,eth0
+            - UPF_INTERFACE_NAME=eth0,eth2
             - UPF_XDP_ATTACH_MODE=generic
             - UPF_API_ADDRESS=:8080
             - UPF_PFCP_ADDRESS=:8805
             - UPF_METRICS_ADDRESS=:9091
             - UPF_PFCP_NODE_ID=192.168.70.134
-            - UPF_N3_ADDRESS=192.168.70.134
+            - UPF_N3_ADDRESS=192.168.71.134
             - UPF_UEIP_POOL=12.1.1.0/24
             - UPF_LOGGING_LEVEL=debug
         cap_add:
             - NET_ADMIN
             - SYS_ADMIN
             - SYS_RESOURCE # setrlimit
-        # cap_drop:
-        #     - ALL
+        cap_drop:
+            - ALL
         ports:
             - "127.0.0.1:8081:8081"
             - "127.0.0.1:8880:8080"
@@ -67,52 +74,86 @@ services:
             - net.ipv4.conf.all.forwarding=1
         privileged: true
         networks:
-            public_net:
+            n4_net:
                 ipv4_address: 192.168.70.134
+            n3_net:
+                ipv4_address: 192.168.71.134
             n6_net:
                 ipv4_address: 192.168.72.134
-    oai-ext-dn:
+    n6-lan:
+        platform: linux/amd64
+        privileged: true
+        init: true
+        container_name: "n6-lan"
+        image: tariromukute/n6-lan-simple:latest
+        command: 
+        - /bin/bash
+        - -c
+        - |
+            sh testovs.sh
+            ovs-vsctl add-port brovs1 eth1
+            ip addr flush dev eth1 && ip addr add 192.168.72.138/26 dev brovs1 && ip link set brovs1 up
+            iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+            ip route add 12.1.1.0/24 via 192.168.72.134 dev brovs1
+            tail -f /dev/null
+        devices:
+            - /dev/net/tun:/dev/net/tun # https://docs.openvswitch.org/en/stable/intro/install/userspace/#building-and-installing
+        volumes:
+            - /lib/modules:/lib/modules
+        networks:
+            n6_net:
+                ipv4_address: 192.168.72.138
+            data_net:
+                ipv4_address: 192.168.73.138
+
+    iperf3:
         privileged: true
         platform: linux/amd64
-        init: true
-        container_name: oai-ext-dn
-        image: oaisoftwarealliance/trf-gen-cn5g:latest
-        entrypoint: /bin/bash -c \
-              "iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE;"\
-              "ip route add 12.1.1.0/24 via 192.168.72.134 dev eth0; ip route; sleep infinity"
-        command: ["/bin/bash", "-c", "trap : SIGTERM SIGINT; sleep infinity & wait"]
-        healthcheck:
-            test: /bin/bash -c "ip r | grep 12.1.1"
-            interval: 10s
-            timeout: 5s
-            retries: 5
+        container_name: "iperf3"
+        image: ubuntu:jammy
+        command: 
+        - /bin/bash
+        - -c
+        - |
+            apt update -y
+            apt install iperf3 -y
+            iperf3 -s
+        cap_add:
+            - NET_ADMIN
         networks:
-            public_net:
-                ipv4_address: 192.168.70.135
-            n6_net:
-                ipv4_address: 192.168.72.135
+            data_net:
+                ipv4_address: 192.168.73.137
+
 networks:
-    public_net:
+    n4_net:
         driver: bridge
-        name: demo-oai-public-net
+        name: demo-n4-net
         ipam:
             config:
                 - subnet: 192.168.70.128/26
         driver_opts:
-            com.docker.network.bridge.name: "demo-oai"
+            com.docker.network.bridge.name: "demo-n4"
     n3_net:
-        name: demo-oai-n3-net
+        driver: bridge
+        name: demo-n3-net
         ipam:
             config:
                 - subnet: 192.168.71.128/26
         driver_opts:
             com.docker.network.bridge.name: "demo-n3"
     n6_net:
-        name: demo-oai-n6-net
+        driver: bridge
+        name: demo-n6-net
         ipam:
-            options:
-                iface: n6
             config:
                 - subnet: 192.168.72.128/26
         driver_opts:
             com.docker.network.bridge.name: "demo-n6"
+    data_net:
+        driver: bridge
+        name: demo-data-net
+        ipam:
+            config:
+                - subnet: 192.168.73.128/26
+        driver_opts:
+            com.docker.network.bridge.name: "demo-dn"

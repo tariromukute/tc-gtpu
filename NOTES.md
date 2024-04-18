@@ -103,7 +103,7 @@ tcpdump -i eth0 -w tmp.pcap
 Or
 
 ```bash
-./tc-gtpu -g eth0 -i uegtp -s 192.168.70.130 -d 192.168.70.134 -u 12.1.1.2 -b 12.1.1.1 --ul-teid 1234 --dl-teid 1234 -q 9 -n 2 -f /home/tu-gtpu.pcap -vvv
+./tc-gtpu -g eth0 -i uegtp -s 192.168.71.130 -d 192.168.71.134 -u 12.1.1.2 -b 12.1.1.1 --ul-teid 1234 --dl-teid 1234 -q 9 -n 2 -f /home/tu-gtpu.pcap -vvv
 ```
 
 ```bash
@@ -196,6 +196,7 @@ sysctl net.ipv4.tcp_timestamps
 sysctl -w net.ipv4.tcp_timestamps=0
 
 ```
+
 ## Useful Resources
 
 - [Understanding tc “direct action” mode for BPF](https://qmonnet.github.io/whirl-offload/2020/04/11/tc-bpf-direct-action/)
@@ -210,3 +211,4 @@ sysctl -w net.ipv4.tcp_timestamps=0
 - https://www.alibabacloud.com/blog/why-are-linux-kernel-protocol-stacks-dropping-syn-packets_595251
 - https://arstechnica.com/civis/threads/a-possibly-simple-sniffer-trace-question-psh-ack.343792/
 - https://blogs.oracle.com/linux/post/notes-on-bpf-7-bpf-tc-and-generic-segmentation-offload
+- https://github.com/antrea-io/antrea/issues/593
