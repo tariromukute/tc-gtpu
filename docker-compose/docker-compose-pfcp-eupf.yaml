@@ -19,14 +19,22 @@ services:
         - /bin/bash
         - -c
         - |
+            apt update -y;
+            apt install curl -y;
+
+            mkdir -p /etc/netns/uegtp0/
+            echo 'nameserver 8.8.8.8' > /etc/netns/uegtp0/resolv.conf
+            mkdir -p /etc/netns/uegtp1/
+            echo 'nameserver 8.8.8.8' > /etc/netns/uegtp1/resolv.conf
+
             ./tc-gtpu -g eth0 -i uegtp -s 192.168.71.130 -d 192.168.71.134 \
             -u 12.1.1.2 -b 12.1.1.1 --ul-teid 1234 --dl-teid 1234 --qfi 9 \
             -n 2 -f /home/tu-gtpu.pcap -vvv
-        healthcheck:
-            test: ip netns exec uegtp0 ping -c 4 192.168.73.129 || exit 1
-            interval: 10s
-            timeout: 5s
-            retries: 5
+        # healthcheck:
+        #     test: ip netns exec uegtp0 ping -c 4 192.168.73.129 || exit 1
+        #     interval: 10s
+        #     timeout: 5s
+        #     retries: 5
         volumes:
             - /sys/kernel/debug/:/sys/kernel/debug/
             - /sys/fs/bpf:/sys/fs/bpf
@@ -42,11 +50,13 @@ services:
     edgecomllc-eupf:
         platform: linux/amd64
         container_name: "edgecomllc-eupf"
-        image: ghcr.io/edgecomllc/eupf:main
+        image: tariromukute/edgecomllc-eupf:sfc-latest
         entrypoint:
         - /bin/sh
         - -c
         - |
+            sysctl -w net.ipv4.conf.eth2.send_redirects=0;
+            sysctl -w net.ipv4.conf.all.send_redirects=0;
             ip route del default;
             ip route add default via 192.168.72.138 dev eth2 &&
             sh /app/bin/entrypoint.sh
@@ -80,26 +90,50 @@ services:
                 ipv4_address: 192.168.71.134
             n6_net:
                 ipv4_address: 192.168.72.134
+                mac_address: 02:42:ac:11:65:43
     n6-lan:
         platform: linux/amd64
         privileged: true
         init: true
         container_name: "n6-lan"
-        image: tariromukute/n6-lan-simple:latest
+        image: tariromukute/openn6lan-ovs:latest
         command: 
         - /bin/bash
         - -c
         - |
             sh testovs.sh
+            # ovs-vsctl add-br brovs1
             ovs-vsctl add-port brovs1 eth1
             ip addr flush dev eth1 && ip addr add 192.168.72.138/26 dev brovs1 && ip link set brovs1 up
-            iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
             ip route add 12.1.1.0/24 via 192.168.72.134 dev brovs1
+
+
+            ovs-vsctl add-port brovs1 eth0
+            ip addr flush dev eth0 && ip addr add 192.168.73.138/26 dev brovs1 && ip link set brovs1 up
+            iptables -t nat -A POSTROUTING -o brovs1 -j MASQUERADE
+
+            ip route del default
+            ip route add default via 192.168.73.129 dev brovs1
+
+            ip link set dev eth1 xdpgeneric obj /app/nsh-decap.bpf.o sec xdp_nsh_decap
+
+            # Without this setup packets are not forwarded
+            sh /app/ovs/install-static-rules.sh
+            
+            sysctl -w net.ipv4.conf.all.send_redirects=0
+            sysctl -w net.ipv4.conf.brovs1.send_redirects=0
+            sysctl -w net.ipv4.conf.eth0.send_redirects=0
+            sysctl -w net.ipv4.conf.eth1.send_redirects=0
+
             tail -f /dev/null
         devices:
             - /dev/net/tun:/dev/net/tun # https://docs.openvswitch.org/en/stable/intro/install/userspace/#building-and-installing
         volumes:
             - /lib/modules:/lib/modules
+        deploy:
+            resources:
+                reservations:
+                    memory: 2G
         networks:
             n6_net:
                 ipv4_address: 192.168.72.138

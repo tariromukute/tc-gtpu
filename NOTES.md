@@ -41,6 +41,8 @@ docker run \
     -it \
     --cap-add=NET_ADMIN \
     --cap-add=SYS_ADMIN \
+    --cap-add=CAP_SYS_ADMIN \
+    --security-opt apparmor=unconfined \
     -v /sys/:/sys/ \
     --device /dev/net/tun \
     tariromukute/tc-gtpu:latest
@@ -194,9 +196,28 @@ netstat -s
 sysctl net.ipv4.tcp_timestamps
 
 sysctl -w net.ipv4.tcp_timestamps=0
-
 ```
 
+Collect on the relavant interfaces with tcpdump
+```bash
+tcpdump -i demo-n3 -A -w demo-n3.pcap
+tcpdump -i demo-n4 -A -w demo-n4.pcap
+tcpdump -i demo-n6 -A -w demo-n6.pcap
+tcpdump -i demo-dn -A -w demo-dn.pcap
+
+(sudo timeout 10 tcpdump -i demo-n3 -A -w demo-n3.pcap & \
+ sudo timeout 10 tcpdump -i demo-n4 -A -w demo-n4.pcap & \
+ sudo timeout 10 tcpdump -i demo-n6 -A -w demo-n6.pcap & \
+ sudo timeout 10 tcpdump -i demo-dn -A -w demo-dn.pcap & \
+ sleep 15) && sudo pkill -P $$
+
+(sudo tcpdump -i demo-n3 -A -w demo-n3.pcap & \
+ sudo tcpdump -i demo-n6 -A -w demo-n6.pcap & \
+ sudo tcpdump -i demo-dn -A -w demo-dn.pcap & \
+ sleep 30) && sudo pkill -P $$
+
+mergecap -w demo.pcap demo-n3.pcap demo-n4.pcap demo-n6.pcap demo-dn.pcap
+```
 ## Useful Resources
 
 - [Understanding tc “direct action” mode for BPF](https://qmonnet.github.io/whirl-offload/2020/04/11/tc-bpf-direct-action/)
