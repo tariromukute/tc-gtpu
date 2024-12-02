@@ -87,6 +87,34 @@ static struct ipv4_gtpu_encap ipv4_gtpu_encap = {
 	.pdu.next_ext = 0,
 };
 
+static struct eth_ipv4_gtpu_encap eth_ipv4_gtpu_encap = {
+    .ethh.h_dest = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+    .ethh.h_source = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+    .ethh.h_proto = bpf_htons(ETH_P_IP),
+	.ipv4h.version = 4,
+    .ipv4h.ihl = 5,
+    .ipv4h.ttl = 64,
+    .ipv4h.protocol = IPPROTO_UDP,
+    .ipv4h.saddr = bpf_htonl(0x0a000304), // 10.0.3.4
+    .ipv4h.daddr = bpf_htonl(0x0a000305), // 10.0.3.5
+    .ipv4h.check = 0,
+
+    .udp.source = bpf_htons(GTP_UDP_PORT),
+	.udp.dest = bpf_htons(GTP_UDP_PORT),
+    .udp.check = 0,
+	
+    .gtpu.flags = 0x34,
+	.gtpu.message_type = GTPU_G_PDU,
+    .gtpu.message_length = 0,
+    
+	.gtpu_hdr_ext.sqn = 0,
+	.gtpu_hdr_ext.npdu = 0,
+	.gtpu_hdr_ext.next_ext = GTPU_EXT_TYPE_PDU_SESSION_CONTAINER,
+	.pdu.length = 1,
+	.pdu.pdu_type = PDU_SESSION_CONTAINER_PDU_TYPE_UL_PSU,
+	.pdu.next_ext = 0,
+};
+
 static struct ipv6_gtpu_encap ipv6_gtpu_encap = {
 	.udp.source = bpf_htons(GTP_UDP_PORT),
 	.udp.dest = bpf_htons(GTP_UDP_PORT),
@@ -305,6 +333,10 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
           BPF_F_ADJ_ROOM_ENCAP_L4_UDP;
 
     int roomlen = sizeof(struct ipv4_gtpu_encap);
+    if (config.pdu_type) {
+        roomlen = sizeof(struct eth_ipv4_gtpu_encap);
+    }
+
     int ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, flags);
     if (ret) {
         bpf_printk("error calling skb adjust room %d, error code %d\n", roomlen, ret);
@@ -315,6 +347,13 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
     data_end = (void *)(unsigned long long)skb->data_end;
     data = (void *)(unsigned long long)skb->data;
     eth = data;
+    nh.pos = data;
+
+    if (config.pdu_type) {
+        goto ethpdu;
+    }
+
+    bpf_printk("tc-gtpu: creating ip gtpu packet");
 
     ipv4_gtpu_encap.ipv4h.daddr = config.daddr.addr.addr4.s_addr;
     ipv4_gtpu_encap.ipv4h.saddr = config.saddr.addr.addr4.s_addr;
@@ -339,6 +378,63 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
     // bpf_printk("Redirecting to gtpu interface\n");
     return bpf_redirect_neigh(config.gtpu_ifindex, NULL, 0, 0);
 
+ethpdu:
+    bpf_printk("tc-gtpu: creating ethernet gtpu packet");
+    struct ethhdr eth_cpy = {};
+    eth = data;
+    if ((void*) eth + sizeof(struct ethhdr) > data_end) {
+        bpf_printk("tc-gtpu: invalid outer ETH packet\n");
+        goto out;
+    }
+    __builtin_memcpy(&eth_cpy, eth, sizeof(struct ethhdr));
+    
+    payload_len += sizeof(struct ethhdr);
+    eth_ipv4_gtpu_encap.ipv4h.daddr = config.daddr.addr.addr4.s_addr;
+    eth_ipv4_gtpu_encap.ipv4h.saddr = config.saddr.addr.addr4.s_addr;
+    eth_ipv4_gtpu_encap.ipv4h.tot_len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len);
+
+    // For checksum to be recalculated
+    bpf_set_hash_invalid(skb);
+    // ipv4_gtpu_encap.ipv4h.check = csum_fold_helper(bpf_csum_diff((__be32 *)&ipv4_gtpu_encap.ipv4h, 0, (__be32 *)&ipv4_gtpu_encap.ipv4h, sizeof(struct iphdr), 0));
+    
+    eth_ipv4_gtpu_encap.udp.len = bpf_htons(sizeof(struct ipv4_gtpu_encap) + payload_len - sizeof(struct iphdr));
+
+    eth_ipv4_gtpu_encap.gtpu.teid = bpf_htonl(teid);
+    eth_ipv4_gtpu_encap.gtpu.message_length = bpf_htons(payload_len + sizeof(struct gtpu_hdr_ext) + sizeof(struct gtp_pdu_session_container));
+
+    ret = bpf_skb_store_bytes(skb, 0, &eth_ipv4_gtpu_encap, roomlen, 0);
+    if (ret) {
+        bpf_printk("tc-gtpu: error storing ip header\n");
+        return TC_ACT_SHOT;
+    }
+
+    data_end = (void *)(unsigned long long)skb->data_end;
+    data = (void *)(unsigned long long)skb->data;
+    eth = data;
+    nh.pos = data;
+
+    if (nh.pos + sizeof(struct eth_ipv4_gtpu_encap) > data_end) {
+        bpf_printk("tc-gtpu: nh.pos has less room for eth encap\n");
+        goto out;
+    }
+    nh.pos += sizeof(struct eth_ipv4_gtpu_encap);
+
+    struct ethhdr *ethp;
+    // if ((void*) ethp + sizeof(struct ethhdr) > data_end) {
+    //     bpf_printk("tc-gtpu: invalid inner ETH packet");
+    //     goto out;
+    // }
+    eth_type = parse_ethhdr(&nh, data_end, &ethp);
+	if (eth_type < 0) {
+        bpf_printk("tc-gtpu: invalid inner eth\n");
+		goto out;
+    }
+
+    __builtin_memcpy(ethp, &eth_cpy, sizeof(struct ethhdr));
+    
+    // bpf_printk("Redirecting to gtpu interface\n");
+    bpf_printk("tc-gtpu: Redirecting to gtpu interface\n");
+    return bpf_redirect_neigh(config.gtpu_ifindex, NULL, 0, 0);
 out:
     return TC_ACT_OK;
 }
@@ -368,6 +464,7 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
     int tnl_interface;
     __u32 key, qfi;
     struct ingress_state *state;
+    struct ethhdr eth_cpy = {};
 
     // Check if the incoming packet is GTPU
 	eth_type = parse_ethhdr(&nh, data_end, &eth);
@@ -403,6 +500,10 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
         tnl_interface = gtpuhdr->teid; // default ifindex = teid
     }
 
+    if (config.pdu_type) {
+        goto ethpdu;
+    }
+
     int roomlen = sizeof(struct ipv4_gtpu_encap);
     int ret = bpf_skb_adjust_room(skb, -roomlen, BPF_ADJ_ROOM_MAC, 0);
     if (ret) {
@@ -424,6 +525,39 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
     if (state && state->qfi && state->ifindex) {
         __builtin_memcpy(eth->h_dest, state->if_mac, ETH_ALEN);
     }
+
+ethpdu:
+    nh.pos += sizeof(struct gtpu_hdr_ext) + sizeof(struct gtp_pdu_session_container);
+    if (nh.pos < data_end) {
+        goto out;
+    }
+
+    eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type != bpf_htons(ETH_P_IP))
+		goto out;
+
+    __builtin_memcpy(&eth_cpy, eth, sizeof(struct ethhdr));
+
+    roomlen = sizeof(struct eth_ipv4_gtpu_encap);
+    ret = bpf_skb_adjust_room(skb, -roomlen, BPF_ADJ_ROOM_MAC, 0);
+    if (ret) {
+        bpf_printk("error reducing skb adjust room.\n");
+        return TC_ACT_SHOT;
+    }
+
+    // Adjust pointers to new packet location after possible linearization
+    data_end = (void *)(unsigned long long)skb->data_end;
+    data = (void *)(unsigned long long)skb->data;
+    eth = data;
+
+    nh.pos = data;
+
+    eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type != bpf_htons(ETH_P_IP))
+		goto out;
+
+    __builtin_memcpy(eth, &eth_cpy, sizeof(struct ethhdr));
+
 
 out:
     return TC_ACT_OK;

@@ -78,6 +78,8 @@ struct config {
 	__u32 dl_teid;
 	__u32 qfi;
 	__u32 num_ues;
+	struct mac_addr src_mac;
+	struct mac_addr dest_mac;
 };
 
 bool validate_ifname(const char* input_ifname)
@@ -117,12 +119,39 @@ static int validate_ip_address(const char *addr_str, struct ip_addr *ipaddr)
     return -1;
 }
 
+static int validate_mac_address(char *str, unsigned char mac[ETH_ALEN])
+{
+	unsigned int v[ETH_ALEN];
+	int len, i;
+
+	len = sscanf(str, "%x:%x:%x:%x:%x:%x%*c",
+		     &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+
+	if (len != ETH_ALEN)
+		return -EINVAL;
+
+	for (i = 0; i < ETH_ALEN; i++) {
+		if (v[i] > 0xFF)
+			return -EINVAL;
+		mac[i] = v[i];
+	}
+	return 0;
+}
+
+bool macaddr_is_null(const struct mac_addr *addr) {
+	static struct mac_addr nulladdr = {};
+
+	return memcmp(addr, &nulladdr, sizeof(nulladdr)) == 0;
+}
+
 static const struct option long_options[] = {
 	{"help",    no_argument,        NULL, 'h' },
 	{"gtpu-interface",  required_argument,    NULL, 'g' },
 	{"tnl-interface",   required_argument,    NULL, 'i' },
 	{"src-ip", required_argument,    NULL, 's' },
 	{"dest-ip",    required_argument,    NULL, 'd' },
+	{"src-mac", optional_argument,    NULL, 'r' },
+	{"dest-mac",    optional_argument,    NULL, 'e' },
 	{"ue-ip",    required_argument,    NULL, 'u' },
 	{"bridge-address", required_argument,    NULL, 'b' },
 	{"ul-teid",    required_argument,    NULL, 'p' },
@@ -163,7 +192,7 @@ void parse_cmdline_args(int argc, char **argv,
 	int opt;
 	unsigned int gtpu_ifindex;
 
-	while ((opt = getopt_long(argc, argv, "hg:i:s:d:u:b:t:p:l:q:n:f:v", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hg:i:s:d:r:e:u:b:t:p:l:q:n:f:v", options, NULL)) != -1) {
 		switch(opt) {
 			case 'h':
 				usage(argv);
@@ -211,6 +240,19 @@ void parse_cmdline_args(int argc, char **argv,
                     exit(EXIT_FAILURE);
                 }
                 cfg->ue_ip.af = AF_INET;
+				break;
+			case 'r':
+                if (validate_mac_address(optarg, &cfg->src_mac) != 0) {
+					pr_warn("Invalid source MAC address\n");
+					usage(argv);
+					exit(EXIT_FAILURE);
+				}
+                break;
+			case 'e':
+                if (validate_mac_address(optarg, &cfg->dest_mac) != 0) {
+                    pr_warn("Invalid destination MAC address '%s'\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
 				break;
 			case 'b':
 				if (inet_pton(AF_INET, optarg, &(cfg->bridge_address.addr.addr4)) <= 0) {
@@ -722,6 +764,12 @@ static void tc_gtpu(struct config *cfg) {
     skel->rodata->config.saddr.af = cfg->src_ip.af;
     memcpy(&skel->rodata->config.saddr.addr, &cfg->src_ip.addr, sizeof(struct ip_addr));
 	skel->rodata->config.verbose_level = verbose_level;
+
+	if(!(macaddr_is_null(&cfg->dest_mac) && macaddr_is_null(&cfg->src_mac))) {
+		memcpy(&skel->rodata->config.src_mac, &cfg->src_mac, sizeof(struct mac_addr));
+		memcpy(&skel->rodata->config.dst_mac, &cfg->dest_mac, sizeof(struct mac_addr));	
+		skel->rodata->config.pdu_type = 1;
+	}
 
 	err = tc_gtpu_bpf__load(skel);
 	if (err) {

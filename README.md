@@ -76,6 +76,12 @@ docker exec -it tc-gtpu \
     tcpdump -ttttnnr /home/tu-gtpu.pcap
 ```
 
+On Terminal 3: See eBPF logs
+```bash
+docker exec -it tc-gtpu \
+    cat /sys/kernel/debug/tracing/trace_pipe
+```
+
 ### Build docker image
 
 Get project

@@ -9,6 +9,15 @@
 #include <linux/if_ether.h>
 #include "gtpu.h"
 
+struct eth_ipv4_gtpu_encap {
+    struct ethhdr ethh;
+    struct iphdr ipv4h;
+    struct udphdr udp;
+    struct gtpuhdr gtpu;
+    struct gtpu_hdr_ext gtpu_hdr_ext;
+    struct gtp_pdu_session_container pdu;
+} __attribute__((__packed__));
+
 struct ipv4_gtpu_encap {
     struct iphdr ipv4h;
     struct udphdr udp;
@@ -36,6 +45,10 @@ struct egress_state {
     __u32 qfi;
 };
 
+struct mac_addr {
+	unsigned char addr[ETH_ALEN];
+};
+
 struct ip_addr {
 	int af;
 	union {
@@ -47,8 +60,11 @@ struct ip_addr {
 struct gtpu_config {
     int verbose_level;
     int gtpu_ifindex;
+    int pdu_type;
     struct ip_addr saddr;
     struct ip_addr daddr;
+    struct mac_addr src_mac;
+    struct mac_addr dst_mac;
 };
 
 #endif /* __CONFIG_HELPERS_H */
