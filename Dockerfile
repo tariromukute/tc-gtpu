@@ -21,7 +21,7 @@ FROM $BASE_IMAGE AS runtime
 
 RUN apt-get update && \
     apt-get install -y iproute2 iputils-ping tcpdump \
-    iperf3 curl \
+    iperf3 curl arping net-tools \
     libelf1 libelf-dev zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
 

@@ -61,6 +61,7 @@ struct gtpu_config {
     int verbose_level;
     int gtpu_ifindex;
     int pdu_type;
+    struct mac_addr gtpu_mac;
     struct ip_addr saddr;
     struct ip_addr daddr;
     struct mac_addr src_mac;

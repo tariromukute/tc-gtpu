@@ -287,6 +287,7 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
     int eth_type, ip_type;
     struct hdr_cursor nh = { .pos = data };
     struct ethhdr *eth = data;
+    struct ethhdr eth_cpy = {};
     struct iphdr *iphdr;
     struct tcphdr *tcphdr;
     __u64 csum = 0;
@@ -301,8 +302,20 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
         handle_perf_pcap(skb);
 
     eth_type = parse_ethhdr(&nh, data_end, &eth);
-	if (eth_type != bpf_htons(ETH_P_IP))
+	if (!(eth_type == bpf_htons(ETH_P_IP) || 
+        ( (eth_type == bpf_htons(ETH_P_AARP) || eth_type == bpf_htons(ETH_P_ARP)) && config.pdu_type) ) 
+    ) {
+        bpf_printk("tc-gtpu: do not support GTPU encap of ETH Type: 0x%0x\n", eth_type);
         goto out;
+    }
+    __builtin_memcpy(&eth_cpy, eth, sizeof(struct ethhdr));
+
+    
+    // __builtin_memcpy(&eth->h_dest, &config.dst_mac.addr, ETH_ALEN);
+    if (eth_type == bpf_htons(ETH_P_AARP) || eth_type == bpf_htons(ETH_P_ARP)) {
+        // skipping linearisation for now
+        goto encap;
+    }
 
     ip_type = parse_iphdr(&nh, data_end, &iphdr);
 	if (ip_type < 0)
@@ -313,6 +326,7 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
         if (bpf_skb_pull_data(skb, bpf_ntohs(iphdr->tot_len) + sizeof(struct ethhdr)) < 0)
             return TC_ACT_UNSPEC;
 
+encap:
     data_end = (void *)(unsigned long long)skb->data_end;
     data = (void *)(unsigned long long)skb->data;
     nh.pos = data;
@@ -335,12 +349,22 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
     int roomlen = sizeof(struct ipv4_gtpu_encap);
     if (config.pdu_type) {
         roomlen = sizeof(struct eth_ipv4_gtpu_encap);
+        flags = flags | BPF_F_ADJ_ROOM_ENCAP_L2_ETH;
     }
 
-    int ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, flags);
-    if (ret) {
-        bpf_printk("error calling skb adjust room %d, error code %d\n", roomlen, ret);
-        return TC_ACT_SHOT;
+    int ret = 0;
+    if (eth_type == bpf_htons(ETH_P_IP) || eth_type == bpf_htons(ETH_P_IPV6)) {
+        ret = bpf_skb_adjust_room(skb, roomlen, BPF_ADJ_ROOM_MAC, flags);
+        if (ret) {
+            bpf_printk("error calling skb adjust room %d, error code %d\n", roomlen, ret);
+            return TC_ACT_SHOT;
+        }
+    } else {
+        ret = bpf_skb_change_head(skb, roomlen, 0);
+        if (ret) {
+            bpf_printk("tc-gtpu: error calling skb change head %d, error code %d\n", roomlen, ret);
+            return TC_ACT_SHOT;
+        }
     }
 
     // Adjust pointers to new packet location after possible linearization
@@ -348,6 +372,11 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
     data = (void *)(unsigned long long)skb->data;
     eth = data;
     nh.pos = data;
+
+    // Check if there is need to linearise
+    if ((data_end - data) < (sizeof(struct ethhdr) + payload_len + roomlen)) {
+        bpf_printk("tc-gtpu: Need to linearise");
+    }
 
     if (config.pdu_type) {
         goto ethpdu;
@@ -380,13 +409,11 @@ int tnl_if_ingress_fn(struct __sk_buff *skb)
 
 ethpdu:
     bpf_printk("tc-gtpu: creating ethernet gtpu packet");
-    struct ethhdr eth_cpy = {};
     eth = data;
     if ((void*) eth + sizeof(struct ethhdr) > data_end) {
         bpf_printk("tc-gtpu: invalid outer ETH packet\n");
         goto out;
     }
-    __builtin_memcpy(&eth_cpy, eth, sizeof(struct ethhdr));
     
     payload_len += sizeof(struct ethhdr);
     eth_ipv4_gtpu_encap.ipv4h.daddr = config.daddr.addr.addr4.s_addr;
@@ -413,6 +440,67 @@ ethpdu:
     eth = data;
     nh.pos = data;
 
+    if ((void*) eth + sizeof(struct ethhdr) > data_end) {
+        bpf_printk("tc-gtpu: invalid outer ETH packet\n");
+        goto out;
+    }
+    __builtin_memcpy(eth, &eth_cpy, sizeof(struct ethhdr));
+    eth->h_proto = bpf_htons(ETH_P_IP);
+    __builtin_memcpy(eth->h_dest, config.dst_mac.addr, ETH_ALEN);
+
+    struct bpf_fib_lookup fib_params = {};
+
+   
+    fib_params.family	= AF_INET;
+    // fib_params.tos		= eth_ipv4_gtpu_encap.ipv4h.tos;
+    fib_params.l4_protocol	= eth_ipv4_gtpu_encap.ipv4h.protocol;
+    fib_params.sport	= 0;
+    fib_params.dport	= 0;
+    // fib_params.tot_len	= bpf_ntohs(eth_ipv4_gtpu_encap.ipv4h.tot_len);
+    fib_params.ipv4_src	= eth_ipv4_gtpu_encap.ipv4h.saddr;
+    // fib_params.ipv4_dst	= eth_ipv4_gtpu_encap.ipv4h.daddr;
+
+    int rc = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params), 0);
+	switch (rc) {
+        case BPF_FIB_LKUP_RET_SUCCESS:         /* lookup successful */
+            // memcpy(eth->h_dest, fib_params.dmac, ETH_ALEN);
+            memcpy(eth->h_source, fib_params.smac, ETH_ALEN);
+            bpf_printk("FIB look up success %x:%x", fib_params.dmac[0], fib_params.dmac[0]);
+            break;
+        case BPF_FIB_LKUP_RET_BLACKHOLE:    /* dest is blackholed; can be dropped */
+        case BPF_FIB_LKUP_RET_UNREACHABLE:  /* dest is unreachable; can be dropped */
+        case BPF_FIB_LKUP_RET_PROHIBIT:     /* dest not allowed; can be dropped */
+            bpf_printk("FIB look up failed, dropping packet");
+            return TC_ACT_SHOT;
+        case BPF_FIB_LKUP_RET_NOT_FWDED:    /* packet is not forwarded */
+        case BPF_FIB_LKUP_RET_FWD_DISABLED: /* fwding is not enabled on ingress */
+        case BPF_FIB_LKUP_RET_UNSUPP_LWT:   /* fwd requires encapsulation */
+        case BPF_FIB_LKUP_RET_NO_NEIGH:     /* no neighbor entry for nh */
+        case BPF_FIB_LKUP_RET_FRAG_NEEDED:  /* fragmentation required to fwd */
+            /* PASS */
+            bpf_printk("Could not find the MAC address, continuing");
+            return TC_ACT_OK;
+        default:
+            bpf_printk("FIB look up default rc %d", rc);
+	}
+    bpf_printk("tc-gtpu: dest 2 %x:%x \n", eth->h_dest[0], eth->h_dest[1]);
+	
+    eth->h_dest[0] = fib_params.dmac[0];
+    eth->h_dest[1] = fib_params.dmac[1];
+    eth->h_dest[2] = fib_params.dmac[2];
+    eth->h_dest[3] = fib_params.dmac[3];
+    eth->h_dest[4] = fib_params.dmac[4];
+    eth->h_dest[5] = fib_params.dmac[5];
+    bpf_printk("tc-gtpu: dest 3 %x:%x \n", eth->h_dest[0], eth->h_dest[1]);
+
+
+    bpf_printk("tc-gtpu: skb->protocol %lx", skb->protocol);
+    // if (bpf_skb_change_proto(skb, bpf_htons(ETH_P_IP), 0)) {
+    //     bpf_printk("Failed to change proto");
+    //     goto out;
+    // }
+    bpf_printk("tc-gtpu: skb->protocol 2 %lx", skb->protocol);
+
     if (nh.pos + sizeof(struct eth_ipv4_gtpu_encap) > data_end) {
         bpf_printk("tc-gtpu: nh.pos has less room for eth encap\n");
         goto out;
@@ -434,11 +522,18 @@ ethpdu:
     
     // bpf_printk("Redirecting to gtpu interface\n");
     bpf_printk("tc-gtpu: Redirecting to gtpu interface\n");
-    return bpf_redirect_neigh(config.gtpu_ifindex, NULL, 0, 0);
+    if (config.verbose_level == LOG_VERBOSE)
+        handle_perf_pcap(skb);
+    /**
+     * NOTE: bpf_redirect_neigh only works for skb-protocol IP or IPv6. 
+     * bpf_skb_change_proto only allows change to or from IP to IPv6
+     * Since ETH PDU can be any ETH type, can't use bpf_redirect_neigh
+     * */ 
+    
+    return bpf_redirect(config.gtpu_ifindex, 0);
 out:
     return TC_ACT_OK;
 }
-
 
 SEC("tc/ingress")
 int gtpu_ingress_fn(struct __sk_buff *skb)
@@ -519,8 +614,10 @@ int gtpu_ingress_fn(struct __sk_buff *skb)
     nh.pos = data;
 
     eth_type = parse_ethhdr(&nh, data_end, &eth);
-	if (eth_type != bpf_htons(ETH_P_IP))
+	if (eth_type < 0) {
+        bpf_printk("tc-gtpu: Invalid ethernet packet\n");
 		goto out;
+    }
 
     if (state && state->qfi && state->ifindex) {
         __builtin_memcpy(eth->h_dest, state->if_mac, ETH_ALEN);
@@ -553,8 +650,10 @@ ethpdu:
     nh.pos = data;
 
     eth_type = parse_ethhdr(&nh, data_end, &eth);
-	if (eth_type != bpf_htons(ETH_P_IP))
+	if (eth_type < 0) {
+        bpf_printk("tc-gtpu: Invalid ethernet packet\n");
 		goto out;
+    }
 
     __builtin_memcpy(eth, &eth_cpy, sizeof(struct ethhdr));
 
@@ -584,9 +683,12 @@ int gtpu_egress_fn(struct __sk_buff *skb)
     struct udphdr *udphdr;
     __u64 csum = 0;
 
+    bpf_printk("tc-gtpu: -------- skb->protocol %lx", skb->protocol);
     eth_type = parse_ethhdr(&nh, data_end, &eth);
-	if (eth_type != bpf_htons(ETH_P_IP))
+	if (eth_type != bpf_htons(ETH_P_IP)) {
+        bpf_printk("tc-gtpu: Expected ETH_P_IP\n");
 		goto out;
+    }
 
     if (config.verbose_level == LOG_VERBOSE)
         handle_perf_pcap(skb);

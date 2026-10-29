@@ -242,16 +242,18 @@ void parse_cmdline_args(int argc, char **argv,
                 cfg->ue_ip.af = AF_INET;
 				break;
 			case 'r':
-                if (validate_mac_address(optarg, &cfg->src_mac) != 0) {
+			    pr_info("Received src mac address\n");
+                if (validate_mac_address(optarg, &cfg->src_mac.addr) != 0) {
 					pr_warn("Invalid source MAC address\n");
-					usage(argv);
-					exit(EXIT_FAILURE);
+					// usage(argv);
+					// exit(EXIT_FAILURE);
 				}
                 break;
 			case 'e':
-                if (validate_mac_address(optarg, &cfg->dest_mac) != 0) {
+			    pr_info("Received dst mac address\n");
+                if (validate_mac_address(optarg, &cfg->dest_mac.addr) != 0) {
                     pr_warn("Invalid destination MAC address '%s'\n", optarg);
-                    exit(EXIT_FAILURE);
+                    // exit(EXIT_FAILURE);
                 }
 				break;
 			case 'b':
@@ -758,6 +760,13 @@ static void tc_gtpu(struct config *cfg) {
 		return;
 	}
 	int gtpu_ifindex = if_nametoindex(cfg->gtpu_ifname);
+	// TODO: GET of gtpu 
+	err = set_if_mac(cfg->gtpu_ifname, skel->rodata->config.gtpu_mac.addr);
+	if (err) {
+		pr_warn("======> Failed to set the gtpu interface MAC address\n");
+		return;
+	}
+	pr_info("===============> GTPU MAC %x:%x:%x\n", skel->rodata->config.gtpu_mac.addr[0], skel->rodata->config.gtpu_mac.addr[1], skel->rodata->config.gtpu_mac.addr[3]);
 	skel->rodata->config.gtpu_ifindex = gtpu_ifindex;
     skel->rodata->config.daddr.af = cfg->dest_ip.af;
     memcpy(&skel->rodata->config.daddr.addr, & cfg->dest_ip.addr, sizeof(struct ip_addr));
@@ -765,9 +774,11 @@ static void tc_gtpu(struct config *cfg) {
     memcpy(&skel->rodata->config.saddr.addr, &cfg->src_ip.addr, sizeof(struct ip_addr));
 	skel->rodata->config.verbose_level = verbose_level;
 
-	if(!(macaddr_is_null(&cfg->dest_mac) && macaddr_is_null(&cfg->src_mac))) {
-		memcpy(&skel->rodata->config.src_mac, &cfg->src_mac, sizeof(struct mac_addr));
-		memcpy(&skel->rodata->config.dst_mac, &cfg->dest_mac, sizeof(struct mac_addr));	
+	if(!(macaddr_is_null(&cfg->dest_mac.addr) && macaddr_is_null(&cfg->src_mac.addr))) {
+		pr_info("Running in ETH PDU session mode\n");
+		memcpy(&skel->rodata->config.src_mac.addr, &cfg->src_mac.addr, ETH_ALEN);
+		memcpy(&skel->rodata->config.dst_mac.addr, &cfg->dest_mac.addr, ETH_ALEN);	
+		// TODO: Set mac of gtpu interface
 		skel->rodata->config.pdu_type = 1;
 	}
 
