@@ -464,6 +464,20 @@ static int create_ue_ns(const char* br_postfix, const char* bridge_address, cons
 		exit(EXIT_FAILURE);
 	}
 
+	// Step 10: Turn off TX checksum offload on the inner veth, so the UE fills
+	// in its TCP/UDP checksums itself. With offload on, veth leaves them
+	// unfinished, tnl_if_ingress_fn tunnels them as they are, and the UPF
+	// forwards packets whose checksums are wrong: TCP never connects.
+	memset(&cmd, 0, CMD_MAX);
+	snprintf(cmd, CMD_MAX,
+		 "ip netns exec %s ethtool -K %s_i tx off > /dev/null 2>&1",
+		 name, ifname);
+	pr_debug(" - Run: %s\n", cmd);
+	ret = system(cmd);
+	if (!WIFEXITED(ret) || WEXITSTATUS(ret) != 0) {
+		pr_warn("Cannot turn off TX checksum offload on %s_i (is ethtool installed?)\n", ifname);
+	}
+
 	return ret;
 }
 
@@ -786,11 +800,13 @@ static void tc_gtpu(struct config *cfg) {
 		"\t 1. RUN: `cat /sys/kernel/debug/tracing/trace_pipe` to see output of the BPF program.\n"
 		"\t 2. RUN: `ip netns exec %s0 ping -c 4 8.8.8.8` to send packet via the gtpu tunnel\n", cfg->tnl_ifname);
 
-	while (true) {
-		if (verbose_level == LOG_VERBOSE && ((err = perf_buffer__poll(pb, 1000)) < 0 && exiting))
-			break;
-		else if (exiting)
-			break;
+	// Wait for a signal. Without the sleep this loop kept a CPU at 100% whenever
+	// there was no perf buffer to poll.
+	while (!exiting) {
+		if (verbose_level == LOG_VERBOSE)
+			err = perf_buffer__poll(pb, 1000);
+		else
+			sleep(1);
 	}
 
 	for (int i = 0; i < num_ues; ++i) {
